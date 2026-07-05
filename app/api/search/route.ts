@@ -90,6 +90,18 @@ export async function POST(req: NextRequest) {
         tokensLeft = productData.tokensLeft;
       }
     }
+   // DEBUG (geçici): ilk 5 ürünün format (binding) ve varyant bilgisini incele
+   allProducts.slice(0, 5).forEach((p: any, i: number) => {
+    console.log(`=== DEBUG #${i} ===`, JSON.stringify({
+      asin: p?.asin,
+      title: p?.title?.slice(0, 35),
+      binding: p?.binding,
+      productGroup: p?.productGroup,
+      newPrice: p?.stats?.current?.[1],
+      parentAsin: p?.parentAsin,
+      variationCount: p?.variations?.length ?? 0,
+    }));
+  });
 
     // BSR'yi güvenilir kaynaktan oku: ürünün salesRanks verisinin son değeri
     function readBsr(p: any): number | null {
