@@ -6,14 +6,18 @@ const CATEGORIES = [
   "Books",
   "CDs & Vinyl",
   "Video Games",
-  "DVD",
-  "Blu-ray",
+  "Movies & TV",
 ];
 
 type ResultItem = {
+  asin: string;
   title: string;
-  bsr: number;
-  price: number;
+  bsr: number | null;
+  newPrice: number | null;
+  usedPrice: number | null;
+  ratio: number;
+  amazonUrl: string;
+  keepaUrl: string;
 };
 
 export default function Home() {
@@ -24,32 +28,56 @@ export default function Home() {
   const [results, setResults] = useState<ResultItem[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [tokensLeft, setTokensLeft] = useState<number | null>(null);
 
-  function handleSearch(e: FormEvent) {
+  async function handleSearch(e: FormEvent) {
     e.preventDefault();
     setLoading(true);
     setHasSearched(true);
 
-    // Şimdilik sahte veri - Keepa API bağlanınca burası gerçek veriyle değişecek
-    setTimeout(() => {
+    try {
+      const res = await fetch("/api/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ category, bsrMin, bsrMax, minPrice }),
+      });
+      const data = await res.json();
+      setResults(data.results || []);
+      // Keepa her cevapta kalan token sayısını döndürüyor, ekranda göstermek için saklıyoruz
+      if (typeof data.tokensLeft === "number") {
+        setTokensLeft(data.tokensLeft);
+      }
+    } catch (error) {
+      console.error("Search request failed:", error);
       setResults([]);
+    } finally {
       setLoading(false);
-    }, 600);
+    }
   }
 
   return (
     <main style={{ maxWidth: "960px", margin: "0 auto", padding: "48px 24px" }}>
       {/* Başlık bölümü */}
       <header style={{ marginBottom: "40px", borderBottom: "1px solid var(--line)", paddingBottom: "24px" }}>
-        <p className="font-mono" style={{ fontSize: "12px", color: "var(--pine)", letterSpacing: "0.05em", marginBottom: "8px" }}>
-          AMAZON SOURCING
-        </p>
-        <h1 className="font-display" style={{ fontSize: "32px", fontWeight: 600, margin: 0 }}>
-          Sourcing Desk
-        </h1>
-        <p style={{ color: "#5C6470", fontSize: "15px", marginTop: "8px" }}>
-          Find Amazon products by category, sales rank range, and price.
-        </p>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div>
+            <p className="font-mono" style={{ fontSize: "12px", color: "var(--pine)", letterSpacing: "0.05em", marginBottom: "8px" }}>
+              AMAZON SOURCING
+            </p>
+            <h1 className="font-display" style={{ fontSize: "32px", fontWeight: 600, margin: 0 }}>
+              Sourcing Desk
+            </h1>
+            <p style={{ color: "#5C6470", fontSize: "15px", marginTop: "8px" }}>
+              Find Amazon products by category, sales rank range, and price.
+            </p>
+          </div>
+          {/* Kalan Keepa token göstergesi (ilk aramadan sonra görünür) */}
+          {tokensLeft !== null && (
+            <div className="font-mono" style={{ fontSize: "12px", color: "#8A8F98", textAlign: "right" }}>
+              Tokens left: {tokensLeft}
+            </div>
+          )}
+        </div>
       </header>
 
       {/* Arama paneli (form) */}
@@ -156,25 +184,35 @@ export default function Home() {
               fontSize: "14px",
             }}
           >
-            Not connected to Amazon yet — results will appear here once the Keepa API is wired up.
+            No products matched all criteria (including the 4x price ratio). Try widening the range.
           </div>
         )}
 
         {results.length > 0 && (
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
-              <tr style={{ borderBottom: "2px solid var(--ink)" }}>
+            <tr style={{ borderBottom: "2px solid var(--ink)" }}>
                 <th style={thStyle}>Product</th>
                 <th style={thStyle}>BSR</th>
-                <th style={thStyle}>Price</th>
+                <th style={thStyle}>New</th>
+                <th style={thStyle}>Used</th>
+                <th style={thStyle}>Ratio</th>
+                <th style={thStyle}>Keepa</th>
               </tr>
             </thead>
             <tbody>
-              {results.map((r, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid var(--line)" }}>
-                  <td style={tdStyle}>{r.title}</td>
-                  <td className="font-mono" style={tdStyle}>{r.bsr}</td>
-                  <td className="font-mono" style={tdStyle}>${r.price}</td>
+            {results.map((r) => (
+                <tr key={r.asin} style={{ borderBottom: "1px solid var(--line)" }}>
+                  <td style={tdStyle}>
+                    <a href={r.amazonUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)" }}>{r.title}</a>
+                  </td>
+                  <td className="font-mono" style={tdStyle}>{r.bsr ?? "-"}</td>
+                  <td className="font-mono" style={tdStyle}>{r.newPrice ? `$${r.newPrice.toFixed(2)}` : "-"}</td>
+                  <td className="font-mono" style={tdStyle}>{r.usedPrice ? `$${r.usedPrice.toFixed(2)}` : "-"}</td>
+                  <td className="font-mono" style={{ ...tdStyle, color: "var(--gold)", fontWeight: 500 }}>{r.ratio}x</td>
+                  <td style={tdStyle}>
+                    <a href={r.keepaUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)", fontSize: "12px" }}>chart</a>
+                  </td>
                 </tr>
               ))}
             </tbody>
