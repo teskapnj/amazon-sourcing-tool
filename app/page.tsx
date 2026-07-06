@@ -4,7 +4,9 @@ import { useState, FormEvent, CSSProperties } from "react";
 
 const CATEGORIES = [
   "Books",
-  "CDs & Vinyl",
+  "CDs",
+  "Vinyl",
+  "Cassettes",
   "Video Games",
   "Movies & TV",
 ];

@@ -1,18 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Desteklenen kategoriler ve Keepa'daki kök kategori numaraları (US pazaryeri için)
-const CATEGORY_IDS: Record<string, number> = {
-  "Books": 283155,
-  "CDs & Vinyl": 5174,
-  "Video Games": 468642,
-  "Movies & TV": 2625373011,
+// Her kategori: Keepa kök kategori numarası + (opsiyonel) binding filtresi.
+// CDs & Vinyl kök kategorisi (5174) CD/Plak/Kaset karışık geliyor,
+// bu yüzden binding alanına göre kod tarafında ayırıyoruz.
+const CATEGORIES: Record<string, { root: number; binding?: string }> = {
+  "Books": { root: 283155 },
+  "CDs": { root: 5174, binding: "audioCD" },
+  "Vinyl": { root: 5174, binding: "lp_record" },
+  "Cassettes": { root: 5174, binding: "cassette" },
+  "Video Games": { root: 468642 },
+  "Movies & TV": { root: 2625373011 },
 };
 
 // New fiyatın Used fiyata oranı en az bu kadar olmalı
 const MIN_PRICE_RATIO = 4;
 
+// New teklifi son 90 günde bu orandan fazla stok dışıysa "hayalet listing" say, ele
+const MAX_OUT_OF_STOCK_90 = 25;
+
 // Kaç ürün taransın (token maliyeti buna bağlı: ~1 token/ürün)
-const PER_PAGE = 250;
+const PER_PAGE = 100;
 
 // Keepa ürün detayı tek istekte max 100 ASIN kabul ediyor, o yüzden parçalıyoruz
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -28,10 +35,12 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { category, bsrMin, bsrMax, minPrice } = body;
 
-    const rootCategory = CATEGORY_IDS[category];
-    if (!rootCategory) {
+    const categoryConfig = CATEGORIES[category];
+    if (!categoryConfig) {
       return NextResponse.json({ error: "Unsupported category" }, { status: 400 });
     }
+    const rootCategory = categoryConfig.root;
+    const bindingFilter = categoryConfig.binding; // örn. "audioCD" / "lp_record" / undefined
 
     const apiKey = process.env.KEEPA_API_KEY;
     if (!apiKey) {
@@ -43,21 +52,27 @@ export async function POST(req: NextRequest) {
     const keepaNowMinutes = Math.floor(Date.now() / 60000) - 21564000;
     const lastOffersUpdate = keepaNowMinutes - 7 * 24 * 60;
 
+    // Ön-filtre: 4x oranı matematiksel olarak tutması imkansız ürünleri baştan ele.
+    // New >= minPrice, oran >= 4 için Used <= minPrice/4 olmalı. Üstündekiler zaten elenecek,
+    // o yüzden detaylarını hiç çekmeyip token harcamıyoruz.
+    const maxUsedCents = Math.round((Number(minPrice) * 100) / MIN_PRICE_RATIO);
+
     // Adım A: Product Finder sorgusu
     const selection = {
-        productType: ["0"],
-        singleVariation: true,
-        rootCategory: String(rootCategory),
-        categories_include: [String(rootCategory)],
-        current_SALES_gte: Number(bsrMin),
-        current_SALES_lte: Number(bsrMax),
-        current_NEW_gte: Math.round(Number(minPrice) * 100),
-        current_USED_gte: 1,
-        lastOffersUpdate_gte: lastOffersUpdate,
-        perPage: PER_PAGE,
-        page: 0,
-        sort: [["current_SALES", "asc"]],
-      };
+      productType: ["0"],
+      singleVariation: true,
+      rootCategory: String(rootCategory),
+      categories_include: [String(rootCategory)],
+      current_SALES_gte: Number(bsrMin),
+      current_SALES_lte: Number(bsrMax),
+      current_NEW_gte: Math.round(Number(minPrice) * 100),
+      current_USED_gte: 1,
+      current_USED_lte: maxUsedCents,
+      lastOffersUpdate_gte: lastOffersUpdate,
+      perPage: PER_PAGE,
+      page: 0,
+      sort: [["current_SALES", "asc"]],
+    };
 
     const finderUrl = `https://api.keepa.com/query?domain=1&key=${apiKey}`;
     const finderRes = await fetch(finderUrl, {
@@ -71,37 +86,26 @@ export async function POST(req: NextRequest) {
     let tokensLeft: number | null = finderData.tokensLeft ?? null;
 
     if (asinList.length === 0) {
-      return NextResponse.json({ results: [], tokensLeft, totalFound: 0 });
+      return NextResponse.json({ results: [], tokensLeft, totalFound: 0, scanned: 0 });
     }
 
-    // Adım B: ASIN'leri 100'erli parçalara böl, her parça için detay çek
+    // Adım B: ASIN'leri 100'erli parçalara böl, her parça için detay çek.
+    // history=0 -> fiyat geçmişi csv'sini çekme (kullanmıyoruz, yanıtı küçültür/hızlandırır)
+    // update=48 -> son 48 saatte güncellenmiş veriyi tekrar zorla çekme (token dostu)
     const asinChunks = chunk(asinList, 100);
     const allProducts: any[] = [];
 
     for (const group of asinChunks) {
-      const productUrl = `https://api.keepa.com/product?key=${apiKey}&domain=1&asin=${group.join(",")}&stats=1`;
+      const productUrl = `https://api.keepa.com/product?key=${apiKey}&domain=1&asin=${group.join(",")}&stats=1&history=0&update=48`;
       const productRes = await fetch(productUrl);
       const productData = await productRes.json();
       if (Array.isArray(productData.products)) {
         allProducts.push(...productData.products);
       }
-      // Her cevapta güncel token sayısını yakala (en son değeri gösteririz)
       if (typeof productData.tokensLeft === "number") {
         tokensLeft = productData.tokensLeft;
       }
     }
-   // DEBUG (geçici): ilk 5 ürünün format (binding) ve varyant bilgisini incele
-   allProducts.slice(0, 5).forEach((p: any, i: number) => {
-    console.log(`=== DEBUG #${i} ===`, JSON.stringify({
-      asin: p?.asin,
-      title: p?.title?.slice(0, 35),
-      binding: p?.binding,
-      productGroup: p?.productGroup,
-      newPrice: p?.stats?.current?.[1],
-      parentAsin: p?.parentAsin,
-      variationCount: p?.variations?.length ?? 0,
-    }));
-  });
 
     // BSR'yi güvenilir kaynaktan oku: ürünün salesRanks verisinin son değeri
     function readBsr(p: any): number | null {
@@ -120,29 +124,24 @@ export async function POST(req: NextRequest) {
       return typeof v === "number" && v > 0 ? v / 100 : null;
     }
 
-    // stats.current: index 1 = New fiyat, index 2 = Used (genel, en düşük kullanılmış)
-    // outOfStockPercentage90: New teklifinin (index 1) son 90 günde ne kadar süre stok dışı olduğu
     const allResults = allProducts.map((p: any) => {
-        const current = p.stats?.current || [];
-        const oosArr = p.stats?.outOfStockPercentage90;
-        const newOutOfStock90 = Array.isArray(oosArr) && typeof oosArr[1] === "number" ? oosArr[1] : null;
-        return {
-          asin: p.asin,
-          title: p.title,
-          newPrice: cents(current[1]),
-          usedPrice: cents(current[2]),
-          bsr: readBsr(p),
-          newOutOfStock90,
-          amazonUrl: `https://www.amazon.com/dp/${p.asin}`,
-          keepaUrl: `https://keepa.com/#!product/1-${p.asin}`,
-        };
-      });
+      const current = p.stats?.current || [];
+      const oosArr = p.stats?.outOfStockPercentage90;
+      const newOutOfStock90 =
+        Array.isArray(oosArr) && typeof oosArr[1] === "number" ? oosArr[1] : null;
+      return {
+        asin: p.asin,
+        title: p.title,
+        binding: p.binding || null,
+        newPrice: cents(current[1]),
+        usedPrice: cents(current[2]),
+        bsr: readBsr(p),
+        newOutOfStock90,
+        amazonUrl: `https://www.amazon.com/dp/${p.asin}`,
+        keepaUrl: `https://keepa.com/#!product/1-${p.asin}`,
+      };
+    });
 
-    // Oran filtresi + en yüksek orandan düşüğe sırala (en iyi fırsat en üstte)
-    // New teklifi son 90 günde bu orandan fazla stok dışıysa "hayalet listing" say, ele
-    const MAX_OUT_OF_STOCK_90 = 25;
-
-    // Oran filtresi + hayalet listing (stok dışı) filtresi + orana göre sırala
     const results = allResults
       .filter(
         (r: any) =>
@@ -150,7 +149,8 @@ export async function POST(req: NextRequest) {
           r.usedPrice !== null &&
           r.newPrice / r.usedPrice >= MIN_PRICE_RATIO &&
           r.newOutOfStock90 !== null &&
-          r.newOutOfStock90 <= MAX_OUT_OF_STOCK_90
+          r.newOutOfStock90 <= MAX_OUT_OF_STOCK_90 &&
+          (!bindingFilter || r.binding === bindingFilter)
       )
       .map((r: any) => ({
         ...r,
