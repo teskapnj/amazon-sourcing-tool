@@ -17,9 +17,12 @@ type ResultItem = {
   bsr: number | null;
   newPrice: number | null;
   usedPrice: number | null;
+  ebayNewPrice: number | null;
+  ebayUsedPrice: number | null;
   ratio: number;
   amazonUrl: string;
   keepaUrl: string;
+  ebayUrl: string;
 };
 
 export default function Home() {
@@ -198,6 +201,8 @@ export default function Home() {
                 <th style={thStyle}>BSR</th>
                 <th style={thStyle}>New</th>
                 <th style={thStyle}>Used</th>
+                <th style={thStyle}>eBay New</th>
+                <th style={thStyle}>eBay Used</th>
                 <th style={thStyle}>Ratio</th>
                 <th style={thStyle}>Keepa</th>
               </tr>
@@ -211,6 +216,10 @@ export default function Home() {
                   <td className="font-mono" style={tdStyle}>{r.bsr ?? "-"}</td>
                   <td className="font-mono" style={tdStyle}>{r.newPrice ? `$${r.newPrice.toFixed(2)}` : "-"}</td>
                   <td className="font-mono" style={tdStyle}>{r.usedPrice ? `$${r.usedPrice.toFixed(2)}` : "-"}</td>
+                  <td className="font-mono" style={tdStyle}>{r.ebayNewPrice ? `$${r.ebayNewPrice.toFixed(2)}` : "-"}</td>
+                  <td className="font-mono" style={tdStyle}>
+                    <a href={r.ebayUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)" }}>{r.ebayUsedPrice ? `$${r.ebayUsedPrice.toFixed(2)}` : "search"}</a>
+                  </td>
                   <td className="font-mono" style={{ ...tdStyle, color: "var(--gold)", fontWeight: 500 }}>{r.ratio}x</td>
                   <td style={tdStyle}>
                     <a href={r.keepaUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)", fontSize: "12px" }}>chart</a>

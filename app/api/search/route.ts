@@ -123,23 +123,34 @@ export async function POST(req: NextRequest) {
     function cents(v: any): number | null {
       return typeof v === "number" && v > 0 ? v / 100 : null;
     }
+    // eBay arama linki: en isabetli kodu seç (EAN/ISBN-13 > UPC > ASIN),
+    // o kodla kullanılmış (Used) filtreli eBay araması yap
+    function buildEbayUrl(p: any): string {
+      const ean = Array.isArray(p.eanList) && p.eanList.length ? p.eanList[0] : null;
+      const upc = Array.isArray(p.upcList) && p.upcList.length ? p.upcList[0] : null;
+      const code = ean || upc || p.asin;
+      return `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(code)}`;
+    }
 
     const allResults = allProducts.map((p: any) => {
       const current = p.stats?.current || [];
       const oosArr = p.stats?.outOfStockPercentage90;
       const newOutOfStock90 =
         Array.isArray(oosArr) && typeof oosArr[1] === "number" ? oosArr[1] : null;
-      return {
-        asin: p.asin,
-        title: p.title,
-        binding: p.binding || null,
-        newPrice: cents(current[1]),
-        usedPrice: cents(current[2]),
-        bsr: readBsr(p),
-        newOutOfStock90,
-        amazonUrl: `https://www.amazon.com/dp/${p.asin}`,
-        keepaUrl: `https://keepa.com/#!product/1-${p.asin}`,
-      };
+        return {
+          asin: p.asin,
+          title: p.title,
+          binding: p.binding || null,
+          newPrice: cents(current[1]),
+          usedPrice: cents(current[2]),
+          ebayNewPrice: cents(current[28]),
+          ebayUsedPrice: cents(current[29]),
+          bsr: readBsr(p),
+          newOutOfStock90,
+          amazonUrl: `https://www.amazon.com/dp/${p.asin}`,
+          keepaUrl: `https://keepa.com/#!product/1-${p.asin}`,
+          ebayUrl: buildEbayUrl(p),
+        };
     });
 
     const results = allResults
