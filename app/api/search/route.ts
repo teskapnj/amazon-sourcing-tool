@@ -33,7 +33,7 @@ function chunk<T>(arr: T[], size: number): T[][] {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { category, bsrMin, bsrMax, minPrice } = body;
+    const { category, bsrMin, bsrMax, minPrice, maxPrice } = body;
 
     const categoryConfig = CATEGORIES[category];
     if (!categoryConfig) {
@@ -66,6 +66,9 @@ export async function POST(req: NextRequest) {
       current_SALES_gte: Number(bsrMin),
       current_SALES_lte: Number(bsrMax),
       current_NEW_gte: Math.round(Number(minPrice) * 100),
+      ...(maxPrice && Number(maxPrice) > 0
+        ? { current_NEW_lte: Math.round(Number(maxPrice) * 100) }
+        : {}),
       current_USED_gte: 1,
       current_USED_lte: maxUsedCents,
       lastOffersUpdate_gte: lastOffersUpdate,
@@ -153,7 +156,24 @@ export async function POST(req: NextRequest) {
         };
     });
 
-    const results = allResults
+    // Hayalet basım ayıklama: Amazon, aynı albümün/filmin farklı basımlarını
+    // varyant ailesi olarak bağlamadan aynı BSR ile gösterebiliyor.
+    // Aynı BSR'yi paylaşan ürünlerden sadece en ucuz New fiyatlısı "gerçek satan"dır;
+    // pahalı olanlar sıralamayı ödünç alan hayaletlerdir, elenir.
+    const bsrGroups = new Map<number, any>();
+    for (const r of allResults) {
+      if (r.bsr === null || r.newPrice === null) continue;
+      const existing = bsrGroups.get(r.bsr);
+      if (!existing || r.newPrice < existing.newPrice) {
+        bsrGroups.set(r.bsr, r);
+      }
+    }
+    const dedupedResults = allResults.filter((r: any) => {
+      if (r.bsr === null || r.newPrice === null) return true; // BSR'si olmayanlara dokunma
+      return bsrGroups.get(r.bsr) === r; // sadece grubun en ucuzu kalır
+    });
+
+    const results = dedupedResults
       .filter(
         (r: any) =>
           r.newPrice !== null &&
