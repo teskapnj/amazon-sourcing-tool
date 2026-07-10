@@ -26,7 +26,7 @@ type ResultItem = {
   bought?: boolean;
 };
 
-type Tab = "search" | "following" | "dismissed";
+type Tab = "search" | "following" | "dismissed" | "seen";
 
 export default function Home() {
   const [tab, setTab] = useState<Tab>("search");
@@ -40,6 +40,7 @@ export default function Home() {
   const [results, setResults] = useState<ResultItem[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [allSeen, setAllSeen] = useState(false);
   const [tokensLeft, setTokensLeft] = useState<number | null>(null);
   const [scanInfo, setScanInfo] = useState<{ scanned: number; totalFound: number | null } | null>(null);
 
@@ -49,11 +50,13 @@ export default function Home() {
   const [following, setFollowing] = useState<ResultItem[]>([]);
   const [followFilter, setFollowFilter] = useState<"all" | "notBought" | "bought">("all");
   const [dismissed, setDismissed] = useState<any[]>([]);
+  const [seen, setSeen] = useState<ResultItem[]>([]);
 
-  // Sayfa açılınca elenenleri ve takip edilenleri yükle
+  // Sayfa açılınca listeleri yükle
   useEffect(() => {
     loadDismissed();
     loadFollowing();
+    loadSeen();
   }, []);
 
   async function loadDismissed() {
@@ -80,10 +83,35 @@ export default function Home() {
     }
   }
 
+  async function loadSeen() {
+    try {
+      const res = await fetch("/api/seen");
+      const data = await res.json();
+      setSeen(data.items || []);
+    } catch (err) {
+      console.error("Failed to load seen:", err);
+    }
+  }
+
+  // Seen'den erken çıkar (30 günü beklemeden tekrar aramalarda görünsün)
+  async function handleRestoreSeen(asin: string) {
+    setSeen((prev) => prev.filter((s) => s.asin !== asin));
+    try {
+      await fetch("/api/seen", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ asin }),
+      });
+    } catch (err) {
+      console.error("Restore seen failed:", err);
+    }
+  }
+
   async function handleSearch(e: FormEvent) {
     e.preventDefault();
     setLoading(true);
     setHasSearched(true);
+    setAllSeen(false);
     try {
       const res = await fetch("/api/search", {
         method: "POST",
@@ -93,7 +121,9 @@ export default function Home() {
       const data = await res.json();
       setResults(data.results || []);
       setScanInfo({ scanned: data.scanned ?? 0, totalFound: data.totalFound ?? null });
+      setAllSeen(!!data.allSeen);
       if (typeof data.tokensLeft === "number") setTokensLeft(data.tokensLeft);
+      loadSeen();
     } catch (error) {
       console.error("Search request failed:", error);
       setResults([]);
@@ -173,7 +203,6 @@ export default function Home() {
   // Alındı (bought) durumunu değiştir
   async function handleToggleBought(item: ResultItem) {
     const newBought = !item.bought;
-    // Ekranda anında güncelle
     setFollowing((prev) =>
       prev.map((f) => (f.asin === item.asin ? { ...f, bought: newBought } : f))
     );
@@ -188,7 +217,7 @@ export default function Home() {
     }
   }
 
-  // Arama sonuçlarından elenenleri gizle
+  // Arama sonuçlarından elenenleri gizle (seen filtreleme route tarafında yapılıyor)
   const visibleResults = results.filter((r) => !dismissedAsins.has(r.asin));
 
   return (
@@ -243,11 +272,12 @@ export default function Home() {
         </button>
       </form>
 
-      {/* Sekmeler - formun altında, sonuç alanının üstünde */}
-      <div style={{ display: "flex", gap: "8px", marginBottom: "20px" }}>
+      {/* Sekmeler */}
+      <div style={{ display: "flex", gap: "8px", marginBottom: "20px", flexWrap: "wrap" }}>
         <TabButton active={tab === "search"} onClick={() => setTab("search")} label={`Results (${visibleResults.length})`} />
         <TabButton active={tab === "following"} onClick={() => setTab("following")} label={`Following (${following.length})`} />
         <TabButton active={tab === "dismissed"} onClick={() => setTab("dismissed")} label={`Dismissed (${dismissed.length})`} />
+        <TabButton active={tab === "seen"} onClick={() => setTab("seen")} label={`Seen (${seen.length})`} />
       </div>
 
       {/* SEARCH (RESULTS) SEKMESİ */}
@@ -259,9 +289,14 @@ export default function Home() {
             </p>
           )}
           {!hasSearched && <p style={{ color: "#8A8F98", fontSize: "14px" }}>Enter your criteria and click &quot;Search&quot;.</p>}
-          {hasSearched && !loading && visibleResults.length === 0 && (
+          {hasSearched && !loading && allSeen && (
             <div style={{ border: "1px dashed var(--line)", borderRadius: "8px", padding: "32px", textAlign: "center", color: "#8A8F98", fontSize: "14px" }}>
-              No products to show. Try widening the range.
+              All products in this range have been seen recently. Try a different range, or check back later.
+            </div>
+          )}
+          {hasSearched && !loading && !allSeen && visibleResults.length === 0 && (
+            <div style={{ border: "1px dashed var(--line)", borderRadius: "8px", padding: "32px", textAlign: "center", color: "#8A8F98", fontSize: "14px" }}>
+              No new opportunities in this batch. Search again for the next set.
             </div>
           )}
           {visibleResults.length > 0 && (
@@ -281,7 +316,6 @@ export default function Home() {
           <p style={{ color: "#8A8F98", fontSize: "14px" }}>No followed products yet. Star items from Results.</p>
         ) : (
           <>
-            {/* Alındı durumuna göre filtre */}
             <div style={{ display: "flex", gap: "6px", marginBottom: "16px" }}>
               <FilterButton active={followFilter === "all"} onClick={() => setFollowFilter("all")} label="All" />
               <FilterButton active={followFilter === "notBought"} onClick={() => setFollowFilter("notBought")} label="Not bought" />
@@ -324,6 +358,21 @@ export default function Home() {
               ))}
             </tbody>
           </table>
+        )
+      )}
+
+      {/* SEEN (HISTORY) SEKMESİ - arama sonucuyla aynı tablo görünümü */}
+      {tab === "seen" && (
+        seen.length === 0 ? (
+          <p style={{ color: "#8A8F98", fontSize: "14px" }}>No seen products yet. Opportunities you&apos;ve searched appear here and stay hidden for 30 days.</p>
+        ) : (
+          <ResultsTable
+            items={seen}
+            followedAsins={followedAsins}
+            onFollow={handleFollow}
+            onRestore={handleRestoreSeen}
+            mode="seen"
+          />
         )
       )}
     </main>
@@ -379,6 +428,7 @@ function ResultsTable({
   onDismiss,
   onUnfollow,
   onToggleBought,
+  onRestore,
   mode = "search",
 }: {
   items: ResultItem[];
@@ -387,7 +437,8 @@ function ResultsTable({
   onDismiss?: (item: ResultItem) => void;
   onUnfollow?: (asin: string) => void;
   onToggleBought?: (item: ResultItem) => void;
-  mode?: "search" | "following";
+  onRestore?: (asin: string) => void;
+  mode?: "search" | "following" | "seen";
 }) {
   return (
     <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -431,6 +482,17 @@ function ResultsTable({
                     {r.bought ? "✓ bought" : "bought"}
                   </button>
                   <button onClick={() => onUnfollow && onUnfollow(r.asin)} style={smallBtnStyle}>unfollow</button>
+                </div>
+              ) : mode === "seen" ? (
+                <div style={{ display: "flex", gap: "6px" }}>
+                  <button
+                    onClick={() => onFollow(r)}
+                    disabled={followedAsins.has(r.asin)}
+                    style={{ ...smallBtnStyle, color: followedAsins.has(r.asin) ? "var(--gold)" : "#999" }}
+                  >
+                    {followedAsins.has(r.asin) ? "★" : "☆"}
+                  </button>
+                  <button onClick={() => onRestore && onRestore(r.asin)} style={smallBtnStyle}>restore</button>
                 </div>
               ) : (
                 <div style={{ display: "flex", gap: "6px" }}>

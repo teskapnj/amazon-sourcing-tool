@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { db } from "@/lib/firebase";
+import { collection, getDocs, doc, writeBatch } from "firebase/firestore";
 
 // Her kategori: Keepa kök kategori numarası + (opsiyonel) binding filtresi.
 // CDs & Vinyl kök kategorisi (5174) CD/Plak/Kaset karışık geliyor,
@@ -18,8 +20,15 @@ const MIN_PRICE_RATIO = 4;
 // New teklifi son 90 günde bu orandan fazla stok dışıysa "hayalet listing" say, ele
 const MAX_OUT_OF_STOCK_90 = 25;
 
-// Kaç ürün taransın (token maliyeti buna bağlı: ~1 token/ürün)
+// Kaç TAZE ürün detayı çekilsin (token maliyeti buna bağlı: ~1 token/ürün)
 const PER_PAGE = 100;
+
+// Seen (görüldü) süresi: bu süre içinde görülen ürün tekrar gösterilmez
+const SEEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 gün
+
+// Finder'dan kaç ASIN isteyelim. Seen olanları eleyeceğimiz için,
+// PER_PAGE taze ürüne ulaşmak adına daha geniş bir havuz çekiyoruz.
+const FINDER_PAGE_SIZE = 300;
 
 // Keepa ürün detayı tek istekte max 100 ASIN kabul ediyor, o yüzden parçalıyoruz
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -28,6 +37,43 @@ function chunk<T>(arr: T[], size: number): T[][] {
     out.push(arr.slice(i, i + size));
   }
   return out;
+}
+
+// Firestore'dan hâlâ taze (30 gün dolmamış) seen ASIN'lerini getir, eskiyi temizle
+async function getFreshSeenAsins(): Promise<Set<string>> {
+  const snap = await getDocs(collection(db, "seen"));
+  const now = Date.now();
+  const fresh = new Set<string>();
+  const expired: string[] = [];
+  snap.docs.forEach((d) => {
+    const data = d.data();
+    const seenAt = data.seenAt || 0;
+    if (now - seenAt < SEEN_TTL_MS) {
+      fresh.add(data.asin);
+    } else {
+      expired.push(d.id);
+    }
+  });
+  if (expired.length > 0) {
+    const batch = writeBatch(db);
+    expired.forEach((id) => batch.delete(doc(db, "seen", id)));
+    batch.commit().catch((e) => console.error("Seen cleanup error:", e));
+  }
+  return fresh;
+}
+
+// Gösterilen taze ürünleri seen olarak kaydet (tüm ürün verisiyle birlikte,
+// böylece Seen sekmesinde arama sonucu tablosuyla aynı görünümü gösterebiliriz)
+async function markSeen(items: any[]) {
+  if (items.length === 0) return;
+  const now = Date.now();
+  const batch = writeBatch(db);
+  for (const it of items) {
+    if (it.asin) {
+      batch.set(doc(db, "seen", it.asin), { ...it, seenAt: now });
+    }
+  }
+  await batch.commit().catch((e) => console.error("markSeen error:", e));
 }
 
 export async function POST(req: NextRequest) {
@@ -40,24 +86,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unsupported category" }, { status: 400 });
     }
     const rootCategory = categoryConfig.root;
-    const bindingFilter = categoryConfig.binding; // örn. "audioCD" / "lp_record" / undefined
+    const bindingFilter = categoryConfig.binding;
 
     const apiKey = process.env.KEEPA_API_KEY;
     if (!apiKey) {
       return NextResponse.json({ error: "Keepa API key not configured" }, { status: 500 });
     }
 
-    // Keepa zamanı: dakika cinsinden, Keepa'nın kendi başlangıç noktasına (2011) göre.
-    // Son 7 gün içinde teklif verisi güncellenmiş ürünler (Used fiyatı taze gelsin diye).
     const keepaNowMinutes = Math.floor(Date.now() / 60000) - 21564000;
     const lastOffersUpdate = keepaNowMinutes - 7 * 24 * 60;
 
-    // Ön-filtre: 4x oranı matematiksel olarak tutması imkansız ürünleri baştan ele.
-    // New >= minPrice, oran >= 4 için Used <= minPrice/4 olmalı. Üstündekiler zaten elenecek,
-    // o yüzden detaylarını hiç çekmeyip token harcamıyoruz.
     const maxUsedCents = Math.round((Number(minPrice) * 100) / MIN_PRICE_RATIO);
 
-    // Adım A: Product Finder sorgusu
+    // Adım A: Product Finder sorgusu (geniş havuz çekiyoruz, seen'leri eleyeceğiz)
     const selection = {
       productType: ["0"],
       singleVariation: true,
@@ -72,7 +113,7 @@ export async function POST(req: NextRequest) {
       current_USED_gte: 1,
       current_USED_lte: maxUsedCents,
       lastOffersUpdate_gte: lastOffersUpdate,
-      perPage: PER_PAGE,
+      perPage: FINDER_PAGE_SIZE,
       page: 0,
       sort: [["current_SALES", "asc"]],
     };
@@ -85,17 +126,31 @@ export async function POST(req: NextRequest) {
     });
 
     const finderData = await finderRes.json();
-    const asinList: string[] = finderData.asinList || [];
+    const allAsins: string[] = finderData.asinList || [];
     let tokensLeft: number | null = finderData.tokensLeft ?? null;
 
-    if (asinList.length === 0) {
+    if (allAsins.length === 0) {
       return NextResponse.json({ results: [], tokensLeft, totalFound: 0, scanned: 0 });
     }
 
-    // Adım B: ASIN'leri 100'erli parçalara böl, her parça için detay çek.
-    // history=0 -> fiyat geçmişi csv'sini çekme (kullanmıyoruz, yanıtı küçültür/hızlandırır)
-    // update=48 -> son 48 saatte güncellenmiş veriyi tekrar zorla çekme (token dostu)
-    const asinChunks = chunk(asinList, 100);
+    // Seen (son 30 günde görülmüş) ASIN'leri çek, Finder sonucundan ELE.
+    const seenSet = await getFreshSeenAsins();
+    const freshAsins = allAsins.filter((a) => !seenSet.has(a));
+
+    if (freshAsins.length === 0) {
+      return NextResponse.json({
+        results: [],
+        tokensLeft,
+        totalFound: finderData.totalResults ?? null,
+        scanned: 0,
+        allSeen: true,
+      });
+    }
+
+    const asinsToFetch = freshAsins.slice(0, PER_PAGE);
+
+    // Adım B: taze ASIN'lerin detayını çek (100'erli parçalar)
+    const asinChunks = chunk(asinsToFetch, 100);
     const allProducts: any[] = [];
 
     for (const group of asinChunks) {
@@ -110,7 +165,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // BSR'yi güvenilir kaynaktan oku: ürünün salesRanks verisinin son değeri
     function readBsr(p: any): number | null {
       const ref = p.salesRankReference;
       const ranks = p.salesRanks?.[String(ref)];
@@ -122,12 +176,10 @@ export async function POST(req: NextRequest) {
       return typeof fromStats === "number" && fromStats > 0 ? fromStats : null;
     }
 
-    // Cent -> dolar çevirici (-1 veya 0 ise "veri yok")
     function cents(v: any): number | null {
       return typeof v === "number" && v > 0 ? v / 100 : null;
     }
-    // eBay arama linki: en isabetli kodu seç (EAN/ISBN-13 > UPC > ASIN),
-    // o kodla kullanılmış (Used) filtreli eBay araması yap
+
     function buildEbayUrl(p: any): string {
       const ean = Array.isArray(p.eanList) && p.eanList.length ? p.eanList[0] : null;
       const upc = Array.isArray(p.upcList) && p.upcList.length ? p.upcList[0] : null;
@@ -140,26 +192,23 @@ export async function POST(req: NextRequest) {
       const oosArr = p.stats?.outOfStockPercentage90;
       const newOutOfStock90 =
         Array.isArray(oosArr) && typeof oosArr[1] === "number" ? oosArr[1] : null;
-        return {
-          asin: p.asin,
-          title: p.title,
-          binding: p.binding || null,
-          newPrice: cents(current[1]),
-          usedPrice: cents(current[2]),
-          ebayNewPrice: cents(current[28]),
-          ebayUsedPrice: cents(current[29]),
-          bsr: readBsr(p),
-          newOutOfStock90,
-          amazonUrl: `https://www.amazon.com/dp/${p.asin}`,
-          keepaUrl: `https://keepa.com/#!product/1-${p.asin}`,
-          ebayUrl: buildEbayUrl(p),
-        };
+      return {
+        asin: p.asin,
+        title: p.title,
+        binding: p.binding || null,
+        newPrice: cents(current[1]),
+        usedPrice: cents(current[2]),
+        ebayNewPrice: cents(current[28]),
+        ebayUsedPrice: cents(current[29]),
+        bsr: readBsr(p),
+        newOutOfStock90,
+        amazonUrl: `https://www.amazon.com/dp/${p.asin}`,
+        keepaUrl: `https://keepa.com/#!product/1-${p.asin}`,
+        ebayUrl: buildEbayUrl(p),
+      };
     });
 
-    // Hayalet basım ayıklama: Amazon, aynı albümün/filmin farklı basımlarını
-    // varyant ailesi olarak bağlamadan aynı BSR ile gösterebiliyor.
-    // Aynı BSR'yi paylaşan ürünlerden sadece en ucuz New fiyatlısı "gerçek satan"dır;
-    // pahalı olanlar sıralamayı ödünç alan hayaletlerdir, elenir.
+    // Hayalet basım ayıklama: aynı BSR'yi paylaşan ürünlerden sadece en ucuz New'i tut
     const bsrGroups = new Map<number, any>();
     for (const r of allResults) {
       if (r.bsr === null || r.newPrice === null) continue;
@@ -169,8 +218,8 @@ export async function POST(req: NextRequest) {
       }
     }
     const dedupedResults = allResults.filter((r: any) => {
-      if (r.bsr === null || r.newPrice === null) return true; // BSR'si olmayanlara dokunma
-      return bsrGroups.get(r.bsr) === r; // sadece grubun en ucuzu kalır
+      if (r.bsr === null || r.newPrice === null) return true;
+      return bsrGroups.get(r.bsr) === r;
     });
 
     const results = dedupedResults
@@ -189,11 +238,30 @@ export async function POST(req: NextRequest) {
       }))
       .sort((a: any, b: any) => b.ratio - a.ratio);
 
+    // Sadece KULLANICIYA GÖSTERİLEN fırsatları (results) seen'e kaydet - tam veriyle.
+    // Böylece Seen sekmesinde arama sonucu tablosuyla birebir aynı görünümü gösteririz.
+    // (Not: fırsat çıkmayan ürünleri de "görüldü" saymak için ayrıca asinsToFetch'i de
+    //  işaretliyoruz ama onları sadece ASIN olarak - tabloda sadece fırsatlar görünecek.)
+    await markSeen(results);
+
+    // Fırsat çıkmayan taranan ürünleri de "görüldü" işaretle (sadece ASIN + tarih),
+    // ki bir sonraki arama onları tekrar çekmesin. Tabloda görünmezler.
+    const resultAsins = new Set(results.map((r: any) => r.asin));
+    const nonOpportunityAsins = asinsToFetch.filter((a) => !resultAsins.has(a));
+    if (nonOpportunityAsins.length > 0) {
+      const now = Date.now();
+      const batch = writeBatch(db);
+      for (const asin of nonOpportunityAsins) {
+        batch.set(doc(db, "seen", asin), { asin, seenAt: now, opportunity: false });
+      }
+      batch.commit().catch((e) => console.error("markSeen (non-opp) error:", e));
+    }
+
     return NextResponse.json({
       results,
       tokensLeft,
       totalFound: finderData.totalResults ?? null,
-      scanned: allResults.length,
+      scanned: allProducts.length,
     });
   } catch (error) {
     console.error("Keepa search error:", error);
