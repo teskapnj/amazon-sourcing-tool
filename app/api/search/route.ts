@@ -14,6 +14,11 @@ const CATEGORIES: Record<string, { root: number; binding?: string }> = {
   "Movies & TV": { root: 2625373011 },
 };
 
+// Books aramalarında elenecek alt kategoriler (education/textbook gürültüsü):
+// Higher & Continuing Education, Adult & Continuing Education, Legal Education,
+// Educational Law & Legislation, Medical Education & Training, College & Education Costs
+const BOOKS_EXCLUDE_CATEGORIES = ["132424", "89185", "13664", "5479", "21152", "3220"];
+
 // New fiyatın Used fiyata oranı en az bu kadar olmalı
 const MIN_PRICE_RATIO = 4;
 
@@ -88,6 +93,9 @@ export async function POST(req: NextRequest) {
     const rootCategory = categoryConfig.root;
     const bindingFilter = categoryConfig.binding;
 
+    // Sadece Books kategorisinde education/textbook alt kategorilerini ele
+    const excludeCategories = category === "Books" ? BOOKS_EXCLUDE_CATEGORIES : [];
+
     const apiKey = process.env.KEEPA_API_KEY;
     if (!apiKey) {
       return NextResponse.json({ error: "Keepa API key not configured" }, { status: 500 });
@@ -104,6 +112,7 @@ export async function POST(req: NextRequest) {
       singleVariation: true,
       rootCategory: String(rootCategory),
       categories_include: [String(rootCategory)],
+      ...(excludeCategories.length > 0 ? { categories_exclude: excludeCategories } : {}),
       current_SALES_gte: Number(bsrMin),
       current_SALES_lte: Number(bsrMax),
       current_NEW_gte: Math.round(Number(minPrice) * 100),
