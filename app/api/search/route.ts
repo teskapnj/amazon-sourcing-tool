@@ -198,6 +198,7 @@ export async function POST(req: NextRequest) {
 
     const allResults = allProducts.map((p: any) => {
       const current = p.stats?.current || [];
+      const avg30 = p.stats?.avg30 || [];
       const oosArr = p.stats?.outOfStockPercentage90;
       const newOutOfStock90 =
         Array.isArray(oosArr) && typeof oosArr[1] === "number" ? oosArr[1] : null;
@@ -207,6 +208,9 @@ export async function POST(req: NextRequest) {
         binding: p.binding || null,
         newPrice: cents(current[1]),
         usedPrice: cents(current[2]),
+        // 30 günlük ortalama fiyatlar (cent -> dolar, -1/0 ise null)
+        newAvg30: cents(avg30[1]),
+        usedAvg30: cents(avg30[2]),
         ebayNewPrice: cents(current[28]),
         ebayUsedPrice: cents(current[29]),
         bsr: readBsr(p),

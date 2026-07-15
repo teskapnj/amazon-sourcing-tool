@@ -17,6 +17,8 @@ type ResultItem = {
   bsr: number | null;
   newPrice: number | null;
   usedPrice: number | null;
+  newAvg30?: number | null;
+  usedAvg30?: number | null;
   ebayNewPrice: number | null;
   ebayUsedPrice: number | null;
   ratio: number;
@@ -447,7 +449,9 @@ function ResultsTable({
           <th style={thStyle}>Product</th>
           <th style={thStyle}>BSR</th>
           <th style={thStyle}>New</th>
+          <th style={thStyle}>Avg 30</th>
           <th style={thStyle}>Used</th>
+          <th style={thStyle}>Avg 30</th>
           <th style={thStyle}>eBay New</th>
           <th style={thStyle}>eBay Used</th>
           <th style={thStyle}>Ratio</th>
@@ -463,7 +467,15 @@ function ResultsTable({
             </td>
             <td className="font-mono" style={tdStyle}>{r.bsr ?? "-"}</td>
             <td className="font-mono" style={tdStyle}>{r.newPrice ? `$${r.newPrice.toFixed(2)}` : "-"}</td>
+            {/* 30 günlük ort. New - anlık fiyat ortalamanın 1.5 katından fazlaysa turuncu (sıçrama/hayalet fiyat sinyali) */}
+            <td className="font-mono" style={{ ...tdStyle, fontSize: "13px", color: r.newAvg30 && r.newPrice && r.newPrice > r.newAvg30 * 1.5 ? "#C77700" : "#8A8F98", fontWeight: r.newAvg30 && r.newPrice && r.newPrice > r.newAvg30 * 1.5 ? 600 : 400 }}>
+              {r.newAvg30 ? `$${r.newAvg30.toFixed(2)}` : "-"}
+            </td>
             <td className="font-mono" style={tdStyle}>{r.usedPrice ? `$${r.usedPrice.toFixed(2)}` : "-"}</td>
+            {/* 30 günlük ort. Used - anlık fiyat ortalamanın yarısından ucuzsa yeşil (buy window sinyali) */}
+            <td className="font-mono" style={{ ...tdStyle, fontSize: "13px", color: r.usedAvg30 && r.usedPrice && r.usedPrice < r.usedAvg30 * 0.5 ? "#2E7D46" : "#8A8F98", fontWeight: r.usedAvg30 && r.usedPrice && r.usedPrice < r.usedAvg30 * 0.5 ? 600 : 400 }}>
+              {r.usedAvg30 ? `$${r.usedAvg30.toFixed(2)}` : "-"}
+            </td>
             <td className="font-mono" style={tdStyle}>{r.ebayNewPrice ? `$${r.ebayNewPrice.toFixed(2)}` : "-"}</td>
             <td className="font-mono" style={tdStyle}>
               <a href={r.ebayUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)" }}>{r.ebayUsedPrice ? `$${r.ebayUsedPrice.toFixed(2)}` : "search"}</a>
