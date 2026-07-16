@@ -5,12 +5,24 @@ import { collection, getDocs, doc, writeBatch } from "firebase/firestore";
 // Her kategori: Keepa kök kategori numarası + (opsiyonel) binding filtresi.
 // CDs & Vinyl kök kategorisi (5174) CD/Plak/Kaset karışık geliyor,
 // bu yüzden binding alanına göre kod tarafında ayırıyoruz.
-const CATEGORIES: Record<string, { root: number; binding?: string }> = {
+const CATEGORIES: Record<string, { root: number; binding?: string; subCategory?: number | number[] }> = {
   "Books": { root: 283155 },
   "CDs": { root: 5174, binding: "audioCD" },
   "Vinyl": { root: 5174, binding: "lp_record" },
   "Cassettes": { root: 5174, binding: "cassette" },
   "Video Games": { root: 468642 },
+  "PS1": { root: 468642, subCategory: 229773 },
+  "PS2": { root: 468642, subCategory: 301712 },
+  "PS3": { root: 468642, subCategory: 14210751 },
+  "PS4": { root: 468642, subCategory: 6427814011 },
+  "PS5": { root: 468642, subCategory: 20972781011 },
+  "Xbox": { root: 468642, subCategory: [14220161, 537504, 6469269011] },
+  "GameCube": { root: 468642, subCategory: 541022 },
+  "PC": { root: 468642, subCategory: 229575 },
+  "Wii": { root: 468642, subCategory: [14218901, 3075112011] },
+  "Dreamcast": { root: 468642, subCategory: 229793 },
+  "PSP": { root: 468642, subCategory: 11075221 },
+  "Nintendo": { root: 468642, subCategory: [11075831, 16227128011, 206234609011, 229763, 2622269011, 294945, 566458] },
   "Movies & TV": { root: 2625373011 },
 };
 
@@ -18,9 +30,6 @@ const CATEGORIES: Record<string, { root: number; binding?: string }> = {
 // Higher & Continuing Education, Adult & Continuing Education, Legal Education,
 // Educational Law & Legislation, Medical Education & Training, College & Education Costs
 const BOOKS_EXCLUDE_CATEGORIES = ["132424", "89185", "13664", "5479", "21152", "3220"];
-
-// New fiyatın Used fiyata oranı en az bu kadar olmalı
-const MIN_PRICE_RATIO = 4;
 
 // New teklifi son 90 günde bu orandan fazla stok dışıysa "hayalet listing" say, ele
 const MAX_OUT_OF_STOCK_90 = 25;
@@ -92,6 +101,8 @@ export async function POST(req: NextRequest) {
     }
     const rootCategory = categoryConfig.root;
     const bindingFilter = categoryConfig.binding;
+    // Platform bazlı alt kategori (ör. PS1) - varsa Finder'da rootCategory yerine bunu kullanırız
+    const subCategory = categoryConfig.subCategory;
 
     // Sadece Books kategorisinde education/textbook alt kategorilerini ele
     const excludeCategories = category === "Books" ? BOOKS_EXCLUDE_CATEGORIES : [];
@@ -104,42 +115,64 @@ export async function POST(req: NextRequest) {
     const keepaNowMinutes = Math.floor(Date.now() / 60000) - 21564000;
     const lastOffersUpdate = keepaNowMinutes - 7 * 24 * 60;
 
-    const maxUsedCents = Math.round((Number(minPrice) * 100) / MIN_PRICE_RATIO);
+    const minCentsQ = Math.round(Number(minPrice) * 100);
+    const maxCentsQ = maxPrice && Number(maxPrice) > 0 ? Math.round(Number(maxPrice) * 100) : null;
 
-    // Adım A: Product Finder sorgusu (geniş havuz çekiyoruz, seen'leri eleyeceğiz)
-    const selection = {
+    // Adım A: Product Finder sorguları.
+    // ESKİDEN: tek sorgu, New fiyatı olma ZORUNLUYDU (current_NEW_gte). Bu, gerçek "New" stoğu
+    // neredeyse hiç olmayan retro platformlarda (PS1, GameCube, Dreamcast vb.) havuzu
+    // Finder aşamasında sıfırlıyordu - kod tarafındaki filtre hiç devreye girmeden.
+    // ŞİMDİ: İKİ sorgu atıyoruz - biri New aralıkta olanlar, biri Used aralıkta olanlar.
+    // ASIN listeleri birleştirilip tekilleştirilir. (~+10 token, karşılığında New'i olmayan
+    // ürünler de havuza girebiliyor.)
+    const baseSelection = {
       productType: ["0"],
       singleVariation: true,
       rootCategory: String(rootCategory),
-      categories_include: [String(rootCategory)],
+      categories_include: (Array.isArray(subCategory) ? subCategory : [subCategory ?? rootCategory]).map(String),
       ...(excludeCategories.length > 0 ? { categories_exclude: excludeCategories } : {}),
       current_SALES_gte: Number(bsrMin),
       current_SALES_lte: Number(bsrMax),
-      current_NEW_gte: Math.round(Number(minPrice) * 100),
-      ...(maxPrice && Number(maxPrice) > 0
-        ? { current_NEW_lte: Math.round(Number(maxPrice) * 100) }
-        : {}),
-      current_USED_gte: 1,
-      current_USED_lte: maxUsedCents,
       lastOffersUpdate_gte: lastOffersUpdate,
       perPage: FINDER_PAGE_SIZE,
       page: 0,
       sort: [["current_SALES", "asc"]],
     };
 
-    const finderUrl = `https://api.keepa.com/query?domain=1&key=${apiKey}`;
-    const finderRes = await fetch(finderUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(selection),
-    });
+    const selections = [
+      {
+        ...baseSelection,
+        current_NEW_gte: minCentsQ,
+        ...(maxCentsQ ? { current_NEW_lte: maxCentsQ } : {}),
+      },
+      {
+        ...baseSelection,
+        current_USED_gte: minCentsQ,
+        ...(maxCentsQ ? { current_USED_lte: maxCentsQ } : {}),
+      },
+    ];
 
-    const finderData = await finderRes.json();
-    const allAsins: string[] = finderData.asinList || [];
-    let tokensLeft: number | null = finderData.tokensLeft ?? null;
+    const finderUrl = `https://api.keepa.com/query?domain=1&key=${apiKey}`;
+    let tokensLeft: number | null = null;
+    let totalFound = 0;
+    const asinSet = new Set<string>();
+
+    for (const sel of selections) {
+      const finderRes = await fetch(finderUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(sel),
+      });
+      const finderData = await finderRes.json();
+      (finderData.asinList || []).forEach((a: string) => asinSet.add(a));
+      if (typeof finderData.totalResults === "number") totalFound += finderData.totalResults;
+      if (typeof finderData.tokensLeft === "number") tokensLeft = finderData.tokensLeft;
+    }
+
+    const allAsins: string[] = Array.from(asinSet);
 
     if (allAsins.length === 0) {
-      return NextResponse.json({ results: [], tokensLeft, totalFound: 0, scanned: 0 });
+      return NextResponse.json({ results: [], tokensLeft, totalFound: totalFound || 0, scanned: 0 });
     }
 
     // Seen (son 30 günde görülmüş) ASIN'leri çek, Finder sonucundan ELE.
@@ -150,7 +183,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         results: [],
         tokensLeft,
-        totalFound: finderData.totalResults ?? null,
+        totalFound: totalFound || null,
         scanned: 0,
         allSeen: true,
       });
@@ -205,6 +238,8 @@ export async function POST(req: NextRequest) {
       return {
         asin: p.asin,
         title: p.title,
+        // Hangi kategoriden arandığı (Books, CDs, Vinyl, ...) - Seen/Following'de filtrelemek için
+        category,
         binding: p.binding || null,
         newPrice: cents(current[1]),
         usedPrice: cents(current[2]),
@@ -235,21 +270,43 @@ export async function POST(req: NextRequest) {
       return bsrGroups.get(r.bsr) === r;
     });
 
+    // Fiyat aralığı kontrolü (dolar -> cent). Artık ORAN FİLTRE DEĞİL, sadece tabloda
+    // bilgi amaçlı gösteriliyor. Ürün, New VEYA Used fiyatından biri aralıktaysa listeye girer.
+    const minCents = Math.round(Number(minPrice) * 100);
+    const maxCents = maxPrice && Number(maxPrice) > 0 ? Math.round(Number(maxPrice) * 100) : null;
+    const inRange = (dollars: number) => {
+      const c = Math.round(dollars * 100);
+      return c >= minCents && (maxCents === null || c <= maxCents);
+    };
+
     const results = dedupedResults
-      .filter(
-        (r: any) =>
-          r.newPrice !== null &&
-          r.usedPrice !== null &&
-          r.newPrice / r.usedPrice >= MIN_PRICE_RATIO &&
-          r.newOutOfStock90 !== null &&
-          r.newOutOfStock90 <= MAX_OUT_OF_STOCK_90 &&
-          (!bindingFilter || r.binding === bindingFilter)
-      )
+      .filter((r: any) => {
+        if (bindingFilter && r.binding !== bindingFilter) return false;
+
+        // Oyun kategorilerinde (Video Games ve tüm platform alt kategorileri) "Renewed"
+        // (yenilenmiş/refurbished) ürünleri ele - bunlar gerçek sıfır New stok değil.
+        if (rootCategory === 468642 && /renewed/i.test(r.title || "")) return false;
+
+        // New fiyatı hiç YOKSA: fiyat aralığı kontrolü dahil hiçbir filtre uygulanmadan
+        // direkt geçirilir (retro platformlarda New zaten yok, elemeye gerek yok).
+        if (r.newPrice === null) return true;
+
+        // New fiyatı VARSA: aralık kontrolü (New veya Used aralıkta olabilir) + stok kontrolü
+        const priceQualifies =
+          inRange(r.newPrice) || (r.usedPrice !== null && inRange(r.usedPrice));
+        if (!priceQualifies) return false;
+
+        return r.newOutOfStock90 !== null && r.newOutOfStock90 <= MAX_OUT_OF_STOCK_90;
+      })
       .map((r: any) => ({
         ...r,
-        ratio: Math.round((r.newPrice / r.usedPrice) * 10) / 10,
+        // Oran sadece bilgi amaçlı: New ve Used ikisi de varsa hesaplanır, yoksa null ("-" görünür)
+        ratio:
+          r.newPrice !== null && r.usedPrice !== null
+            ? Math.round((r.newPrice / r.usedPrice) * 10) / 10
+            : null,
       }))
-      .sort((a: any, b: any) => b.ratio - a.ratio);
+      .sort((a: any, b: any) => (b.ratio ?? 0) - (a.ratio ?? 0));
 
     // Sadece KULLANICIYA GÖSTERİLEN fırsatları (results) seen'e kaydet - tam veriyle.
     // Böylece Seen sekmesinde arama sonucu tablosuyla birebir aynı görünümü gösteririz.
@@ -273,7 +330,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       results,
       tokensLeft,
-      totalFound: finderData.totalResults ?? null,
+      totalFound: totalFound || null,
       scanned: allProducts.length,
     });
   } catch (error) {

@@ -8,12 +8,25 @@ const CATEGORIES = [
   "Vinyl",
   "Cassettes",
   "Video Games",
+  "PS1",
+  "PS2",
+  "PS3",
+  "PS4",
+  "PS5",
+  "Xbox",
+  "GameCube",
+  "PC",
+  "Wii",
+  "Dreamcast",
+  "PSP",
+  "Nintendo",
   "Movies & TV",
 ];
 
 type ResultItem = {
   asin: string;
   title: string;
+  category?: string;
   bsr: number | null;
   newPrice: number | null;
   usedPrice: number | null;
@@ -21,7 +34,7 @@ type ResultItem = {
   usedAvg30?: number | null;
   ebayNewPrice: number | null;
   ebayUsedPrice: number | null;
-  ratio: number;
+  ratio: number | null;
   amazonUrl: string;
   keepaUrl: string;
   ebayUrl: string;
@@ -44,15 +57,17 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [allSeen, setAllSeen] = useState(false);
   const [tokensLeft, setTokensLeft] = useState<number | null>(null);
-  const [scanInfo, setScanInfo] = useState<{ scanned: number; totalFound: number | null } | null>(null);
+  const [scanInfo, setScanInfo] = useState<{ scanned: number; totalFound: number | null; ghostFiltered?: number } | null>(null);
 
   // Firestore listeleri
   const [dismissedAsins, setDismissedAsins] = useState<Set<string>>(new Set());
   const [followedAsins, setFollowedAsins] = useState<Set<string>>(new Set());
   const [following, setFollowing] = useState<ResultItem[]>([]);
   const [followFilter, setFollowFilter] = useState<"all" | "notBought" | "bought">("all");
+  const [followCategoryFilter, setFollowCategoryFilter] = useState<string>("all");
   const [dismissed, setDismissed] = useState<any[]>([]);
   const [seen, setSeen] = useState<ResultItem[]>([]);
+  const [seenCategoryFilter, setSeenCategoryFilter] = useState<string>("all");
 
   // Sayfa açılınca listeleri yükle
   useEffect(() => {
@@ -122,7 +137,7 @@ export default function Home() {
       });
       const data = await res.json();
       setResults(data.results || []);
-      setScanInfo({ scanned: data.scanned ?? 0, totalFound: data.totalFound ?? null });
+      setScanInfo({ scanned: data.scanned ?? 0, totalFound: data.totalFound ?? null, ghostFiltered: data.ghostFiltered ?? 0 });
       setAllSeen(!!data.allSeen);
       if (typeof data.tokensLeft === "number") setTokensLeft(data.tokensLeft);
       loadSeen();
@@ -222,6 +237,19 @@ export default function Home() {
   // Arama sonuçlarından elenenleri gizle (seen filtreleme route tarafında yapılıyor)
   const visibleResults = results.filter((r) => !dismissedAsins.has(r.asin));
 
+  // Seen/Following listelerinde GERÇEKTEN mevcut olan kategorileri çıkar
+  // (ör. hiç Vinyl aramadıysan "Vinyl" butonu görünmesin)
+  const seenCategories = Array.from(new Set(seen.map((s) => s.category).filter(Boolean))) as string[];
+  const followingCategories = Array.from(new Set(following.map((f) => f.category).filter(Boolean))) as string[];
+
+  const filteredSeen = seen.filter((s) => seenCategoryFilter === "all" || s.category === seenCategoryFilter);
+  const filteredFollowing = following.filter((f) => {
+    const categoryOk = followCategoryFilter === "all" || f.category === followCategoryFilter;
+    const boughtOk =
+      followFilter === "all" ? true : followFilter === "bought" ? f.bought : !f.bought;
+    return categoryOk && boughtOk;
+  });
+
   return (
     <main style={{ maxWidth: "1100px", margin: "0 auto", padding: "48px 24px" }}>
       {/* Başlık */}
@@ -261,11 +289,11 @@ export default function Home() {
             <input type="number" value={bsrMax} onChange={(e) => setBsrMax(e.target.value)} style={{ ...inputStyle, fontFamily: "IBM Plex Mono, monospace" }} placeholder="300000" />
           </div>
           <div>
-            <label style={labelStyle}>Min. new price ($)</label>
+            <label style={labelStyle}>Min. price ($)</label>
             <input type="number" value={minPrice} onChange={(e) => setMinPrice(e.target.value)} style={{ ...inputStyle, fontFamily: "IBM Plex Mono, monospace" }} placeholder="90" />
           </div>
           <div>
-            <label style={labelStyle}>Max. new price ($)</label>
+            <label style={labelStyle}>Max. price ($)</label>
             <input type="number" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} style={{ ...inputStyle, fontFamily: "IBM Plex Mono, monospace" }} placeholder="no limit" />
           </div>
         </div>
@@ -287,7 +315,9 @@ export default function Home() {
         <>
           {scanInfo && (
             <p className="font-mono" style={{ fontSize: "12px", color: "#8A8F98", marginBottom: "12px" }}>
-              Scanned {scanInfo.scanned}{scanInfo.totalFound ? ` of ${scanInfo.totalFound} matching` : ""} · {visibleResults.length} shown
+              Scanned {scanInfo.scanned}{scanInfo.totalFound ? ` of ${scanInfo.totalFound} matching` : ""}
+              {scanInfo.ghostFiltered ? ` · ${scanInfo.ghostFiltered} ghost filtered` : ""}
+              {" · "}{visibleResults.length} shown
             </p>
           )}
           {!hasSearched && <p style={{ color: "#8A8F98", fontSize: "14px" }}>Enter your criteria and click &quot;Search&quot;.</p>}
@@ -318,21 +348,32 @@ export default function Home() {
           <p style={{ color: "#8A8F98", fontSize: "14px" }}>No followed products yet. Star items from Results.</p>
         ) : (
           <>
-            <div style={{ display: "flex", gap: "6px", marginBottom: "16px" }}>
+            <div style={{ display: "flex", gap: "6px", marginBottom: "12px", flexWrap: "wrap" }}>
               <FilterButton active={followFilter === "all"} onClick={() => setFollowFilter("all")} label="All" />
               <FilterButton active={followFilter === "notBought"} onClick={() => setFollowFilter("notBought")} label="Not bought" />
               <FilterButton active={followFilter === "bought"} onClick={() => setFollowFilter("bought")} label="Bought" />
             </div>
-            <ResultsTable
-              items={following.filter((f) =>
-                followFilter === "all" ? true : followFilter === "bought" ? f.bought : !f.bought
-              )}
-              followedAsins={followedAsins}
-              onFollow={handleFollow}
-              onUnfollow={handleUnfollow}
-              onToggleBought={handleToggleBought}
-              mode="following"
-            />
+            {/* Kategori filtresi: hangi türde ürüne bakmak istediğini seç (Books, CDs, Vinyl...) */}
+            {followingCategories.length > 1 && (
+              <div style={{ display: "flex", gap: "6px", marginBottom: "16px", flexWrap: "wrap" }}>
+                <FilterButton active={followCategoryFilter === "all"} onClick={() => setFollowCategoryFilter("all")} label="All types" />
+                {followingCategories.map((c) => (
+                  <FilterButton key={c} active={followCategoryFilter === c} onClick={() => setFollowCategoryFilter(c)} label={c} />
+                ))}
+              </div>
+            )}
+            {filteredFollowing.length === 0 ? (
+              <p style={{ color: "#8A8F98", fontSize: "14px" }}>No items match this filter.</p>
+            ) : (
+              <ResultsTable
+                items={filteredFollowing}
+                followedAsins={followedAsins}
+                onFollow={handleFollow}
+                onUnfollow={handleUnfollow}
+                onToggleBought={handleToggleBought}
+                mode="following"
+              />
+            )}
           </>
         )
       )}
@@ -368,13 +409,28 @@ export default function Home() {
         seen.length === 0 ? (
           <p style={{ color: "#8A8F98", fontSize: "14px" }}>No seen products yet. Opportunities you&apos;ve searched appear here and stay hidden for 30 days.</p>
         ) : (
-          <ResultsTable
-            items={seen}
-            followedAsins={followedAsins}
-            onFollow={handleFollow}
-            onRestore={handleRestoreSeen}
-            mode="seen"
-          />
+          <>
+            {/* Kategori filtresi: hangi türde ürüne bakmak istediğini seç (Books, CDs, Vinyl...) */}
+            {seenCategories.length > 1 && (
+              <div style={{ display: "flex", gap: "6px", marginBottom: "16px", flexWrap: "wrap" }}>
+                <FilterButton active={seenCategoryFilter === "all"} onClick={() => setSeenCategoryFilter("all")} label="All types" />
+                {seenCategories.map((c) => (
+                  <FilterButton key={c} active={seenCategoryFilter === c} onClick={() => setSeenCategoryFilter(c)} label={c} />
+                ))}
+              </div>
+            )}
+            {filteredSeen.length === 0 ? (
+              <p style={{ color: "#8A8F98", fontSize: "14px" }}>No items match this filter.</p>
+            ) : (
+              <ResultsTable
+                items={filteredSeen}
+                followedAsins={followedAsins}
+                onFollow={handleFollow}
+                onRestore={handleRestoreSeen}
+                mode="seen"
+              />
+            )}
+          </>
         )
       )}
     </main>
@@ -402,7 +458,7 @@ function TabButton({ active, onClick, label }: { active: boolean; onClick: () =>
   );
 }
 
-// --- Filtre butonu bileşeni (Following sekmesindeki All/Not bought/Bought) ---
+// --- Filtre butonu bileşeni (Following/Seen sekmelerindeki filtreler) ---
 function FilterButton({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
   return (
     <button
@@ -480,7 +536,7 @@ function ResultsTable({
             <td className="font-mono" style={tdStyle}>
               <a href={r.ebayUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)" }}>{r.ebayUsedPrice ? `$${r.ebayUsedPrice.toFixed(2)}` : "search"}</a>
             </td>
-            <td className="font-mono" style={{ ...tdStyle, color: "var(--gold)", fontWeight: 500 }}>{r.ratio}x</td>
+            <td className="font-mono" style={{ ...tdStyle, color: "var(--gold)", fontWeight: 500 }}>{r.ratio !== null && r.ratio !== undefined ? `${r.ratio}x` : "-"}</td>
             <td style={tdStyle}>
               <a href={r.keepaUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)", fontSize: "12px" }}>chart</a>
             </td>
