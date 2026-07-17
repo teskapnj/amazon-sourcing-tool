@@ -61,7 +61,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [allSeen, setAllSeen] = useState(false);
   const [tokensLeft, setTokensLeft] = useState<number | null>(null);
-  const [scanInfo, setScanInfo] = useState<{ scanned: number; totalFound: number | null; ghostFiltered?: number } | null>(null);
+  const [scanInfo, setScanInfo] = useState<{ scanned: number; totalFound: number | null } | null>(null);
 
   // Firestore listeleri
   const [dismissedAsins, setDismissedAsins] = useState<Set<string>>(new Set());
@@ -161,7 +161,7 @@ export default function Home() {
       });
       const data = await res.json();
       setResults(data.results || []);
-      setScanInfo({ scanned: data.scanned ?? 0, totalFound: data.totalFound ?? null, ghostFiltered: data.ghostFiltered ?? 0 });
+      setScanInfo({ scanned: data.scanned ?? 0, totalFound: data.totalFound ?? null });
       setAllSeen(!!data.allSeen);
       if (typeof data.tokensLeft === "number") setTokensLeft(data.tokensLeft);
       loadSeen();
@@ -339,7 +339,6 @@ export default function Home() {
           {scanInfo && (
             <p className="font-mono" style={{ fontSize: "12px", color: "#8A8F98", marginBottom: "12px" }}>
               Scanned {scanInfo.scanned}{scanInfo.totalFound ? ` of ${scanInfo.totalFound} matching` : ""}
-              {scanInfo.ghostFiltered ? ` · ${scanInfo.ghostFiltered} ghost filtered` : ""}
               {" · "}{visibleResults.length} shown
             </p>
           )}

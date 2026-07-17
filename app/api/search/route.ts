@@ -244,7 +244,6 @@ export async function POST(req: NextRequest) {
         binding: p.binding || null,
         newPrice: cents(current[1]),
         usedPrice: cents(current[2]),
-        // 30 günlük ortalama fiyatlar (cent -> dolar, -1/0 ise null)
         // 90 günlük ortalama fiyatlar (cent -> dolar, -1/0 ise null)
         newAvg90: cents(avg90[1]),
         usedAvg90: cents(avg90[2]),
@@ -274,11 +273,9 @@ export async function POST(req: NextRequest) {
 
     // Fiyat aralığı kontrolü (dolar -> cent). Artık ORAN FİLTRE DEĞİL, sadece tabloda
     // bilgi amaçlı gösteriliyor. Ürün, New VEYA Used fiyatından biri aralıktaysa listeye girer.
-    const minCents = Math.round(Number(minPrice) * 100);
-    const maxCents = maxPrice && Number(maxPrice) > 0 ? Math.round(Number(maxPrice) * 100) : null;
     const inRange = (dollars: number) => {
       const c = Math.round(dollars * 100);
-      return c >= minCents && (maxCents === null || c <= maxCents);
+      return c >= minCentsQ && (maxCentsQ === null || c <= maxCentsQ);
     };
 
     const results = dedupedResults
