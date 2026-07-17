@@ -7,6 +7,7 @@ import { collection, getDocs, doc, writeBatch } from "firebase/firestore";
 // bu yüzden binding alanına göre kod tarafında ayırıyoruz.
 const CATEGORIES: Record<string, { root: number; binding?: string; subCategory?: number | number[] }> = {
   "Books": { root: 283155 },
+  "Biography": { root: 283155, subCategory: 2 },
   "CDs": { root: 5174, binding: "audioCD" },
   "Vinyl": { root: 5174, binding: "lp_record" },
   "Cassettes": { root: 5174, binding: "cassette" },
@@ -231,7 +232,7 @@ export async function POST(req: NextRequest) {
 
     const allResults = allProducts.map((p: any) => {
       const current = p.stats?.current || [];
-      const avg30 = p.stats?.avg30 || [];
+      const avg90 = p.stats?.avg90 || [];
       const oosArr = p.stats?.outOfStockPercentage90;
       const newOutOfStock90 =
         Array.isArray(oosArr) && typeof oosArr[1] === "number" ? oosArr[1] : null;
@@ -244,8 +245,9 @@ export async function POST(req: NextRequest) {
         newPrice: cents(current[1]),
         usedPrice: cents(current[2]),
         // 30 günlük ortalama fiyatlar (cent -> dolar, -1/0 ise null)
-        newAvg30: cents(avg30[1]),
-        usedAvg30: cents(avg30[2]),
+        // 90 günlük ortalama fiyatlar (cent -> dolar, -1/0 ise null)
+        newAvg90: cents(avg90[1]),
+        usedAvg90: cents(avg90[2]),
         ebayNewPrice: cents(current[28]),
         ebayUsedPrice: cents(current[29]),
         bsr: readBsr(p),

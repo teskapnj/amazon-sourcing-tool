@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect, FormEvent, CSSProperties } from "react";
+import { useState, useEffect, useMemo, FormEvent, CSSProperties } from "react";
 
 const CATEGORIES = [
   "Books",
+  "Biography",
   "CDs",
   "Vinyl",
   "Cassettes",
@@ -30,8 +31,8 @@ type ResultItem = {
   bsr: number | null;
   newPrice: number | null;
   usedPrice: number | null;
-  newAvg30?: number | null;
-  usedAvg30?: number | null;
+  newAvg90?: number | null;
+  usedAvg90?: number | null;
   ebayNewPrice: number | null;
   ebayUsedPrice: number | null;
   ratio: number | null;
@@ -42,6 +43,9 @@ type ResultItem = {
 };
 
 type Tab = "search" | "following" | "dismissed" | "seen";
+
+// Sıralanabilir sütunlar - tabloda tıklanabilir başlıklar bu anahtarlarla eşleşir
+type SortKey = "bsr" | "newPrice" | "newAvg90" | "usedPrice" | "usedAvg90" | "ebayNewPrice" | "ebayUsedPrice" | "ratio";
 
 export default function Home() {
   const [tab, setTab] = useState<Tab>("search");
@@ -62,6 +66,9 @@ export default function Home() {
   // Firestore listeleri
   const [dismissedAsins, setDismissedAsins] = useState<Set<string>>(new Set());
   const [followedAsins, setFollowedAsins] = useState<Set<string>>(new Set());
+  // En son tıklanan (incelenen) ürün - localStorage'da kalıcı. Sadece SON tıklanan işaretli kalır,
+  // yeni bir ürüne tıklayınca öncekinin işareti otomatik kalkar.
+  const [lastClickedAsin, setLastClickedAsin] = useState<string | null>(null);
   const [following, setFollowing] = useState<ResultItem[]>([]);
   const [followFilter, setFollowFilter] = useState<"all" | "notBought" | "bought">("all");
   const [followCategoryFilter, setFollowCategoryFilter] = useState<string>("all");
@@ -74,7 +81,24 @@ export default function Home() {
     loadDismissed();
     loadFollowing();
     loadSeen();
+    // En son tıklanan ürünü localStorage'dan yükle
+    try {
+      const stored = localStorage.getItem("lastClickedAsin");
+      if (stored) setLastClickedAsin(stored);
+    } catch (err) {
+      console.error("Failed to load last clicked asin:", err);
+    }
   }, []);
+
+  // Bir ürüne tıklandığında (satırı yeşile boyamak için) işaretle - öncekinin işareti otomatik kalkar
+  function handleItemClick(asin: string) {
+    setLastClickedAsin(asin);
+    try {
+      localStorage.setItem("lastClickedAsin", asin);
+    } catch (err) {
+      console.error("Failed to save last clicked asin:", err);
+    }
+  }
 
   async function loadDismissed() {
     try {
@@ -238,7 +262,6 @@ export default function Home() {
   const visibleResults = results.filter((r) => !dismissedAsins.has(r.asin));
 
   // Seen/Following listelerinde GERÇEKTEN mevcut olan kategorileri çıkar
-  // (ör. hiç Vinyl aramadıysan "Vinyl" butonu görünmesin)
   const seenCategories = Array.from(new Set(seen.map((s) => s.category).filter(Boolean))) as string[];
   const followingCategories = Array.from(new Set(following.map((f) => f.category).filter(Boolean))) as string[];
 
@@ -337,6 +360,8 @@ export default function Home() {
               followedAsins={followedAsins}
               onFollow={handleFollow}
               onDismiss={handleDismiss}
+              lastClickedAsin={lastClickedAsin}
+              onItemClick={handleItemClick}
             />
           )}
         </>
@@ -353,7 +378,6 @@ export default function Home() {
               <FilterButton active={followFilter === "notBought"} onClick={() => setFollowFilter("notBought")} label="Not bought" />
               <FilterButton active={followFilter === "bought"} onClick={() => setFollowFilter("bought")} label="Bought" />
             </div>
-            {/* Kategori filtresi: hangi türde ürüne bakmak istediğini seç (Books, CDs, Vinyl...) */}
             {followingCategories.length > 1 && (
               <div style={{ display: "flex", gap: "6px", marginBottom: "16px", flexWrap: "wrap" }}>
                 <FilterButton active={followCategoryFilter === "all"} onClick={() => setFollowCategoryFilter("all")} label="All types" />
@@ -372,6 +396,8 @@ export default function Home() {
                 onUnfollow={handleUnfollow}
                 onToggleBought={handleToggleBought}
                 mode="following"
+                lastClickedAsin={lastClickedAsin}
+                onItemClick={handleItemClick}
               />
             )}
           </>
@@ -410,7 +436,6 @@ export default function Home() {
           <p style={{ color: "#8A8F98", fontSize: "14px" }}>No seen products yet. Opportunities you&apos;ve searched appear here and stay hidden for 30 days.</p>
         ) : (
           <>
-            {/* Kategori filtresi: hangi türde ürüne bakmak istediğini seç (Books, CDs, Vinyl...) */}
             {seenCategories.length > 1 && (
               <div style={{ display: "flex", gap: "6px", marginBottom: "16px", flexWrap: "wrap" }}>
                 <FilterButton active={seenCategoryFilter === "all"} onClick={() => setSeenCategoryFilter("all")} label="All types" />
@@ -428,6 +453,8 @@ export default function Home() {
                 onFollow={handleFollow}
                 onRestore={handleRestoreSeen}
                 mode="seen"
+                lastClickedAsin={lastClickedAsin}
+                onItemClick={handleItemClick}
               />
             )}
           </>
@@ -458,7 +485,7 @@ function TabButton({ active, onClick, label }: { active: boolean; onClick: () =>
   );
 }
 
-// --- Filtre butonu bileşeni (Following/Seen sekmelerindeki filtreler) ---
+// --- Filtre butonu bileşeni ---
 function FilterButton({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
   return (
     <button
@@ -478,6 +505,36 @@ function FilterButton({ active, onClick, label }: { active: boolean; onClick: ()
   );
 }
 
+// --- Sıralanabilir sütun başlığı bileşeni ---
+// Tıklanınca: hiç seçili değilse -> azalan (yüksekten düşüğe), aynı sütuna tekrar tıklanırsa yön değişir
+function SortableHeader({
+  label,
+  sortKey,
+  activeSortKey,
+  sortDir,
+  onSort,
+}: {
+  label: string;
+  sortKey: SortKey;
+  activeSortKey: SortKey | null;
+  sortDir: "asc" | "desc";
+  onSort: (key: SortKey) => void;
+}) {
+  const isActive = activeSortKey === sortKey;
+  return (
+    <th
+      onClick={() => onSort(sortKey)}
+      style={{ ...thStyle, cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" }}
+      title="Click to sort"
+    >
+      {label}
+      <span style={{ marginLeft: "4px", color: isActive ? "var(--ink)" : "#C4C9D0", fontSize: "10px" }}>
+        {isActive ? (sortDir === "asc" ? "▲" : "▼") : "▲▼"}
+      </span>
+    </th>
+  );
+}
+
 // --- Ortak sonuç tablosu bileşeni ---
 function ResultsTable({
   items,
@@ -488,6 +545,8 @@ function ResultsTable({
   onToggleBought,
   onRestore,
   mode = "search",
+  lastClickedAsin,
+  onItemClick,
 }: {
   items: ResultItem[];
   followedAsins: Set<string>;
@@ -497,40 +556,72 @@ function ResultsTable({
   onToggleBought?: (item: ResultItem) => void;
   onRestore?: (asin: string) => void;
   mode?: "search" | "following" | "seen";
+  lastClickedAsin?: string | null;
+  onItemClick?: (asin: string) => void;
 }) {
+  // Her tablo örneği kendi sıralama durumunu tutar (Results/Following/Seen birbirinden bağımsız)
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  function handleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  }
+
+  // Sıralanmış liste - null değerler her zaman en sona düşer (hangi yönde sıralanırsa sıralansın)
+  const sortedItems = useMemo(() => {
+    if (!sortKey) return items;
+    const withIndex = items.map((item, idx) => ({ item, idx }));
+    withIndex.sort((a, b) => {
+      const av = a.item[sortKey];
+      const bv = b.item[sortKey];
+      const aNull = av === null || av === undefined;
+      const bNull = bv === null || bv === undefined;
+      if (aNull && bNull) return a.idx - b.idx;
+      if (aNull) return 1;
+      if (bNull) return -1;
+      const diff = (av as number) - (bv as number);
+      if (diff !== 0) return sortDir === "asc" ? diff : -diff;
+      return a.idx - b.idx;
+    });
+    return withIndex.map((w) => w.item);
+  }, [items, sortKey, sortDir]);
+
   return (
     <table style={{ width: "100%", borderCollapse: "collapse" }}>
       <thead>
         <tr style={{ borderBottom: "2px solid var(--ink)" }}>
           <th style={thStyle}>Product</th>
-          <th style={thStyle}>BSR</th>
-          <th style={thStyle}>New</th>
-          <th style={thStyle}>Avg 30</th>
-          <th style={thStyle}>Used</th>
-          <th style={thStyle}>Avg 30</th>
-          <th style={thStyle}>eBay New</th>
-          <th style={thStyle}>eBay Used</th>
-          <th style={thStyle}>Ratio</th>
+          <SortableHeader label="BSR" sortKey="bsr" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+          <SortableHeader label="New" sortKey="newPrice" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+          <SortableHeader label="Avg 90" sortKey="newAvg90" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+          <SortableHeader label="Used" sortKey="usedPrice" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+          <SortableHeader label="Avg 90" sortKey="usedAvg90" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+          <SortableHeader label="eBay New" sortKey="ebayNewPrice" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+          <SortableHeader label="eBay Used" sortKey="ebayUsedPrice" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+          <SortableHeader label="Ratio" sortKey="ratio" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
           <th style={thStyle}>Keepa</th>
           <th style={thStyle}></th>
         </tr>
       </thead>
       <tbody>
-        {items.map((r) => (
-          <tr key={r.asin} style={{ borderBottom: "1px solid var(--line)", background: r.bought ? "#E9F5EC" : "transparent" }}>
+        {sortedItems.map((r) => (
+          <tr key={r.asin} style={{ borderBottom: "1px solid var(--line)", background: r.bought ? "#E9F5EC" : lastClickedAsin === r.asin ? "#BBF7D0" : "transparent" }}>
             <td style={tdStyle}>
-              <a href={r.amazonUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)" }}>{r.title}</a>
+              <a href={r.amazonUrl} target="_blank" rel="noopener noreferrer" onClick={() => onItemClick && onItemClick(r.asin)} style={{ color: "var(--pine)" }}>{r.title}</a>
             </td>
             <td className="font-mono" style={tdStyle}>{r.bsr ?? "-"}</td>
             <td className="font-mono" style={tdStyle}>{r.newPrice ? `$${r.newPrice.toFixed(2)}` : "-"}</td>
-            {/* 30 günlük ort. New - anlık fiyat ortalamanın 1.5 katından fazlaysa turuncu (sıçrama/hayalet fiyat sinyali) */}
-            <td className="font-mono" style={{ ...tdStyle, fontSize: "13px", color: r.newAvg30 && r.newPrice && r.newPrice > r.newAvg30 * 1.5 ? "#C77700" : "#8A8F98", fontWeight: r.newAvg30 && r.newPrice && r.newPrice > r.newAvg30 * 1.5 ? 600 : 400 }}>
-              {r.newAvg30 ? `$${r.newAvg30.toFixed(2)}` : "-"}
+            <td className="font-mono" style={{ ...tdStyle, fontSize: "13px", color: r.newAvg90 && r.newPrice && r.newPrice > r.newAvg90 * 1.5 ? "#C77700" : "#8A8F98", fontWeight: r.newAvg90 && r.newPrice && r.newPrice > r.newAvg90 * 1.5 ? 600 : 400 }}>
+              {r.newAvg90 ? `$${r.newAvg90.toFixed(2)}` : "-"}
             </td>
             <td className="font-mono" style={tdStyle}>{r.usedPrice ? `$${r.usedPrice.toFixed(2)}` : "-"}</td>
-            {/* 30 günlük ort. Used - anlık fiyat ortalamanın yarısından ucuzsa yeşil (buy window sinyali) */}
-            <td className="font-mono" style={{ ...tdStyle, fontSize: "13px", color: r.usedAvg30 && r.usedPrice && r.usedPrice < r.usedAvg30 * 0.5 ? "#2E7D46" : "#8A8F98", fontWeight: r.usedAvg30 && r.usedPrice && r.usedPrice < r.usedAvg30 * 0.5 ? 600 : 400 }}>
-              {r.usedAvg30 ? `$${r.usedAvg30.toFixed(2)}` : "-"}
+            <td className="font-mono" style={{ ...tdStyle, fontSize: "13px", color: r.usedAvg90 && r.usedPrice && r.usedPrice < r.usedAvg90 * 0.5 ? "#2E7D46" : "#8A8F98", fontWeight: r.usedAvg90 && r.usedPrice && r.usedPrice < r.usedAvg90 * 0.5 ? 600 : 400 }}>
+              {r.usedAvg90 ? `$${r.usedAvg90.toFixed(2)}` : "-"}
             </td>
             <td className="font-mono" style={tdStyle}>{r.ebayNewPrice ? `$${r.ebayNewPrice.toFixed(2)}` : "-"}</td>
             <td className="font-mono" style={tdStyle}>
