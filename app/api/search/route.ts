@@ -31,7 +31,10 @@ const CATEGORIES: Record<string, { root: number; binding?: string; subCategory?:
 // Higher & Continuing Education, Adult & Continuing Education, Legal Education,
 // Educational Law & Legislation, Medical Education & Training, College & Education Costs
 // + Science & Math (75): matematik/kimya/fizik/biyoloji ders kitaplarının çoğu bu dalda
-const BOOKS_EXCLUDE_CATEGORIES = ["132424", "89185", "13664", "5479", "21152", "3220", "75"];
+// + Law (10777): hukuk casebook/ders kitapları bu dalda
+// + Teen & YA > Education & Reference (3344092011): lise ders kitapları (Holt McDougal vb.)
+// + Medical Books (173514): tıp/hemşirelik/sağlık ders kitapları
+const BOOKS_EXCLUDE_CATEGORIES = ["132424", "89185", "13664", "5479", "21152", "3220", "75", "10777", "3344092011", "173514"];
 
 // New teklifi son 90 günde bu orandan fazla stok dışıysa "hayalet listing" say, ele
 const MAX_OUT_OF_STOCK_90 = 25;
