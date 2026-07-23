@@ -30,7 +30,8 @@ const CATEGORIES: Record<string, { root: number; binding?: string; subCategory?:
 // Books aramalarında elenecek alt kategoriler (education/textbook gürültüsü):
 // Higher & Continuing Education, Adult & Continuing Education, Legal Education,
 // Educational Law & Legislation, Medical Education & Training, College & Education Costs
-const BOOKS_EXCLUDE_CATEGORIES = ["132424", "89185", "13664", "5479", "21152", "3220"];
+// + Science & Math (75): matematik/kimya/fizik/biyoloji ders kitaplarının çoğu bu dalda
+const BOOKS_EXCLUDE_CATEGORIES = ["132424", "89185", "13664", "5479", "21152", "3220", "75"];
 
 // New teklifi son 90 günde bu orandan fazla stok dışıysa "hayalet listing" say, ele
 const MAX_OUT_OF_STOCK_90 = 25;
@@ -105,8 +106,9 @@ export async function POST(req: NextRequest) {
     // Platform bazlı alt kategori (ör. PS1) - varsa Finder'da rootCategory yerine bunu kullanırız
     const subCategory = categoryConfig.subCategory;
 
-    // Sadece Books kategorisinde education/textbook alt kategorilerini ele
-    const excludeCategories = category === "Books" ? BOOKS_EXCLUDE_CATEGORIES : [];
+    // Education/textbook gürültüsünü TÜM kitap kategorilerinde ele
+    // (Books, Biography ve ileride eklenecek diğer kitap alt kategorileri - hepsi kök 283155)
+    const excludeCategories = rootCategory === 283155 ? BOOKS_EXCLUDE_CATEGORIES : [];
 
     const apiKey = process.env.KEEPA_API_KEY;
     if (!apiKey) {
@@ -224,10 +226,10 @@ export async function POST(req: NextRequest) {
     }
 
     function buildEbayUrl(p: any): string {
-      const ean = Array.isArray(p.eanList) && p.eanList.length ? p.eanList[0] : null;
-      const upc = Array.isArray(p.upcList) && p.upcList.length ? p.upcList[0] : null;
-      const code = ean || upc || p.asin;
-      return `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(code)}`;
+      // Başlık öncelikli: eBay satıcılarının çoğu UPC/EAN'i doğru girmiyor, ama başlık
+      // her zaman var. Kod bazlı arama (UPC/ISBN) çoğu zaman az/hiç sonuç getirmiyor.
+      const query = p.title || p.asin;
+      return `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}`;
     }
 
     const allResults = allProducts.map((p: any) => {
@@ -239,6 +241,11 @@ export async function POST(req: NextRequest) {
       return {
         asin: p.asin,
         title: p.title,
+        // eBay aramasında öncelikli kullanılacak ürün kodu (EAN/UPC) - varsa kesin eşleşme sağlar
+        upc:
+          (Array.isArray(p.eanList) && p.eanList.length ? p.eanList[0] : null) ||
+          (Array.isArray(p.upcList) && p.upcList.length ? p.upcList[0] : null) ||
+          null,
         // Hangi kategoriden arandığı (Books, CDs, Vinyl, ...) - Seen/Following'de filtrelemek için
         category,
         binding: p.binding || null,
@@ -285,6 +292,20 @@ export async function POST(req: NextRequest) {
         // Oyun kategorilerinde (Video Games ve tüm platform alt kategorileri) "Renewed"
         // (yenilenmiş/refurbished) ürünleri ele - bunlar gerçek sıfır New stok değil.
         if (rootCategory === 468642 && /renewed/i.test(r.title || "")) return false;
+
+        // Kitap kategorilerinde ders kitabı/akademik gürültüsünü başlıktan da ele
+        // (kategori filtresi bazılarını kaçırıyor)
+        if (rootCategory === 283155) {
+          const t = r.title || "";
+          // "5th Edition" gibi baskı numarası - ders kitaplarının en tipik işareti
+          if (/\b\d+(st|nd|rd|th)\s+edition\b/i.test(t)) return false;
+          // Doğrudan ders kitabı ifadeleri
+          if (/\btextbook\b|\bstudy guide\b|\bworkbook\b|\bsolutions? manual\b|\binstructor'?s\b|\bstudent edition\b|\btest bank\b|\blab manual\b|\bcourse\b/i.test(t)) return false;
+          // Akademik başlık kalıpları: "Elementary X", "Introduction to X", "Principles of X" vb.
+          if (/^(elementary|introduction to|introductory|principles of|fundamentals of|essentials of|foundations of|basic|advanced|applied|modern)\s/i.test(t)) return false;
+          // Tipik akademik konu adları başlıkta geçiyorsa
+          if (/\b(algebra|calculus|trigonometry|statistics|biochemistry|organic chemistry|microeconomics|macroeconomics|econometrics|thermodynamics|anatomy (and|&) physiology|pharmacology|psychology|sociology)\b/i.test(t)) return false;
+        }
 
         // New fiyatı hiç YOKSA: fiyat aralığı kontrolü dahil hiçbir filtre uygulanmadan
         // direkt geçirilir (retro platformlarda New zaten yok, elemeye gerek yok).

@@ -27,6 +27,7 @@ const CATEGORIES = [
 type ResultItem = {
   asin: string;
   title: string;
+  upc?: string | null;
   category?: string;
   bsr: number | null;
   newPrice: number | null;
@@ -45,7 +46,7 @@ type ResultItem = {
 type Tab = "search" | "following" | "dismissed" | "seen";
 
 // Sıralanabilir sütunlar - tabloda tıklanabilir başlıklar bu anahtarlarla eşleşir
-type SortKey = "bsr" | "newPrice" | "newAvg90" | "usedPrice" | "usedAvg90" | "ebayNewPrice" | "ebayUsedPrice" | "ratio";
+type SortKey = "bsr" | "newPrice" | "newAvg90" | "usedPrice" | "usedAvg90" | "ratio";
 
 export default function Home() {
   const [tab, setTab] = useState<Tab>("search");
@@ -562,6 +563,27 @@ function ResultsTable({
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
+  // Canlı eBay fiyatları (buton'a basınca dolan) - asin -> sonuç
+  type EbayData = { newLowest: number | null; usedLowest: number | null; newCount: number; usedCount: number; url: string; noCode?: boolean };
+  const [ebayResults, setEbayResults] = useState<Record<string, EbayData | "loading" | "error">>({});
+
+  async function checkEbay(asin: string, title: string, upc?: string | null) {
+    setEbayResults((prev) => ({ ...prev, [asin]: "loading" }));
+    try {
+      const res = await fetch("/api/ebay-price", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, upc }),
+      });
+      if (!res.ok) throw new Error("eBay request failed");
+      const data = await res.json();
+      setEbayResults((prev) => ({ ...prev, [asin]: data }));
+    } catch (err) {
+      console.error("eBay check failed:", err);
+      setEbayResults((prev) => ({ ...prev, [asin]: "error" }));
+    }
+  }
+
   function handleSort(key: SortKey) {
     if (sortKey === key) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -600,8 +622,8 @@ function ResultsTable({
           <SortableHeader label="Avg 90" sortKey="newAvg90" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
           <SortableHeader label="Used" sortKey="usedPrice" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
           <SortableHeader label="Avg 90" sortKey="usedAvg90" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
-          <SortableHeader label="eBay New" sortKey="ebayNewPrice" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
-          <SortableHeader label="eBay Used" sortKey="ebayUsedPrice" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+          <th style={thStyle}>eBay New</th>
+          <th style={thStyle}>eBay Used</th>
           <SortableHeader label="Ratio" sortKey="ratio" activeSortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
           <th style={thStyle}>Keepa</th>
           <th style={thStyle}></th>
@@ -622,10 +644,40 @@ function ResultsTable({
             <td className="font-mono" style={{ ...tdStyle, fontSize: "13px", color: r.usedAvg90 && r.usedPrice && r.usedPrice < r.usedAvg90 * 0.5 ? "#2E7D46" : "#8A8F98", fontWeight: r.usedAvg90 && r.usedPrice && r.usedPrice < r.usedAvg90 * 0.5 ? 600 : 400 }}>
               {r.usedAvg90 ? `$${r.usedAvg90.toFixed(2)}` : "-"}
             </td>
-            <td className="font-mono" style={tdStyle}>{r.ebayNewPrice ? `$${r.ebayNewPrice.toFixed(2)}` : "-"}</td>
-            <td className="font-mono" style={tdStyle}>
-              <a href={r.ebayUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)" }}>{r.ebayUsedPrice ? `$${r.ebayUsedPrice.toFixed(2)}` : "search"}</a>
-            </td>
+            {(() => {
+              const eb = ebayResults[r.asin];
+              const done = eb && eb !== "loading" && eb !== "error";
+              const noCode = done && (eb as any).noCode;
+              const newTxt =
+                eb === "loading" ? "..." :
+                eb === "error" ? "err" :
+                noCode ? "no code" :
+                done ? (eb.newLowest !== null ? `$${eb.newLowest.toFixed(2)}` : "-") : "";
+              const usedTxt =
+                eb === "loading" ? "..." :
+                eb === "error" ? "err" :
+                noCode ? "-" :
+                done ? (eb.usedLowest !== null ? `$${eb.usedLowest.toFixed(2)}` : "-") : "";
+              const link = done && !noCode ? (eb as any).url : null;
+              return (
+                <>
+                  <td className="font-mono" style={tdStyle}>
+                    {link ? (
+                      <a href={link} target="_blank" rel="noopener noreferrer" style={{ color: newTxt === "-" ? "#B0B4BA" : "var(--pine)" }}>{newTxt}</a>
+                    ) : noCode ? (
+                      <span style={{ color: "#B0B4BA", fontSize: "12px" }}>{newTxt}</span>
+                    ) : (
+                      <button onClick={() => checkEbay(r.asin, r.title, r.upc)} style={{ ...smallBtnStyle, fontSize: "11px" }}>check</button>
+                    )}
+                  </td>
+                  <td className="font-mono" style={tdStyle}>
+                    {link ? (
+                      <a href={link} target="_blank" rel="noopener noreferrer" style={{ color: usedTxt === "-" ? "#B0B4BA" : "var(--pine)" }}>{usedTxt}</a>
+                    ) : usedTxt}
+                  </td>
+                </>
+              );
+            })()}
             <td className="font-mono" style={{ ...tdStyle, color: "var(--gold)", fontWeight: 500 }}>{r.ratio !== null && r.ratio !== undefined ? `${r.ratio}x` : "-"}</td>
             <td style={tdStyle}>
               <a href={r.keepaUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)", fontSize: "12px" }}>chart</a>
