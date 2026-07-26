@@ -41,9 +41,14 @@ type ResultItem = {
   keepaUrl: string;
   ebayUrl: string;
   bought?: boolean;
+  // Satın alma takip alanları (Purchases sekmesi)
+  ebayCost?: number | null;
+  ebayBuyDate?: string | null;
+  amazonSellDate?: string | null;
+  notes?: string | null;
 };
 
-type Tab = "search" | "following" | "dismissed" | "seen";
+type Tab = "search" | "following" | "purchases" | "dismissed" | "seen";
 
 // Sıralanabilir sütunlar - tabloda tıklanabilir başlıklar bu anahtarlarla eşleşir
 type SortKey = "bsr" | "newPrice" | "newAvg90" | "usedPrice" | "usedAvg90" | "ratio";
@@ -259,8 +264,32 @@ export default function Home() {
     }
   }
 
+  // Purchases sekmesi: satın alma takip alanlarını güncelle (eBay maliyeti, tarihler, not)
+  async function handleUpdatePurchase(asin: string, field: string, value: string) {
+    // Önce ekranda anında güncelle (kullanıcı beklemesin)
+    setFollowing((prev) =>
+      prev.map((f) =>
+        f.asin === asin
+          ? { ...f, [field]: field === "ebayCost" ? (value === "" ? null : Number(value)) : value }
+          : f
+      )
+    );
+    try {
+      await fetch("/api/follow", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ asin, [field]: value }),
+      });
+    } catch (err) {
+      console.error("Update purchase failed:", err);
+    }
+  }
+
   // Arama sonuçlarından elenenleri gizle (seen filtreleme route tarafında yapılıyor)
   const visibleResults = results.filter((r) => !dismissedAsins.has(r.asin));
+
+  // Purchases: sadece "bought" işaretli ürünler
+  const purchases = following.filter((f) => f.bought);
 
   // Seen/Following listelerinde GERÇEKTEN mevcut olan kategorileri çıkar
   const seenCategories = Array.from(new Set(seen.map((s) => s.category).filter(Boolean))) as string[];
@@ -330,6 +359,7 @@ export default function Home() {
       <div style={{ display: "flex", gap: "8px", marginBottom: "20px", flexWrap: "wrap" }}>
         <TabButton active={tab === "search"} onClick={() => setTab("search")} label={`Results (${visibleResults.length})`} />
         <TabButton active={tab === "following"} onClick={() => setTab("following")} label={`Following (${following.length})`} />
+        <TabButton active={tab === "purchases"} onClick={() => setTab("purchases")} label={`Purchases (${purchases.length})`} />
         <TabButton active={tab === "dismissed"} onClick={() => setTab("dismissed")} label={`Dismissed (${dismissed.length})`} />
         <TabButton active={tab === "seen"} onClick={() => setTab("seen")} label={`Seen (${seen.length})`} />
       </div>
@@ -401,6 +431,17 @@ export default function Home() {
               />
             )}
           </>
+        )
+      )}
+
+      {/* PURCHASES SEKMESİ - satın alınan ürünlerin kâr/zarar takibi */}
+      {tab === "purchases" && (
+        purchases.length === 0 ? (
+          <p style={{ color: "#8A8F98", fontSize: "14px" }}>
+            No purchases yet. Mark items as &quot;bought&quot; in Following to track them here.
+          </p>
+        ) : (
+          <PurchasesTable items={purchases} onUpdate={handleUpdatePurchase} />
         )
       )}
 
@@ -631,9 +672,9 @@ function ResultsTable({
       </thead>
       <tbody>
         {sortedItems.map((r) => (
-          <tr key={r.asin} style={{ borderBottom: "1px solid var(--line)", background: r.bought ? "#E9F5EC" : lastClickedAsin === r.asin ? "#BBF7D0" : "transparent" }}>
+          <tr key={r.asin} onClick={() => onItemClick && onItemClick(r.asin)} style={{ borderBottom: "1px solid var(--line)", cursor: "pointer", background: r.bought ? "#E9F5EC" : lastClickedAsin === r.asin ? "#BBF7D0" : "transparent" }}>
             <td style={tdStyle}>
-              <a href={r.amazonUrl} target="_blank" rel="noopener noreferrer" onClick={() => onItemClick && onItemClick(r.asin)} style={{ color: "var(--pine)" }}>{r.title}</a>
+              <a href={r.amazonUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)" }}>{r.title}</a>
             </td>
             <td className="font-mono" style={tdStyle}>{r.bsr ?? "-"}</td>
             <td className="font-mono" style={tdStyle}>{r.newPrice ? `$${r.newPrice.toFixed(2)}` : "-"}</td>
@@ -726,7 +767,126 @@ function ResultsTable({
   );
 }
 
+// --- Satın alma takip tablosu (Purchases sekmesi) ---
+// Net kazanç = (Amazon fiyatı x 0.84) - 10 - eBay maliyeti
+// 0.84: Amazon komisyonu sonrası kalan oran (%16 kesinti)
+// 10: sabit gider (kargo/FBA vb.)
+function PurchasesTable({
+  items,
+  onUpdate,
+}: {
+  items: ResultItem[];
+  onUpdate: (asin: string, field: string, value: string) => void;
+}) {
+  function netProfit(amazonPrice: number | null, ebayCost: number | null | undefined): number | null {
+    if (amazonPrice === null || ebayCost === null || ebayCost === undefined) return null;
+    return Math.round((amazonPrice * 0.84 - 10 - ebayCost) * 100) / 100;
+  }
+
+  // Toplam kâr (hesaplanabilenlerin toplamı)
+  const totalProfit = items.reduce((sum, r) => {
+    const p = netProfit(r.newPrice ?? r.usedPrice, r.ebayCost);
+    return p !== null ? sum + p : sum;
+  }, 0);
+
+  return (
+    <>
+      <p className="font-mono" style={{ fontSize: "13px", color: "#5C6470", marginBottom: "12px" }}>
+        Total net profit:{" "}
+        <span style={{ color: totalProfit >= 0 ? "#2E7D46" : "#C0392B", fontWeight: 600 }}>
+          ${totalProfit.toFixed(2)}
+        </span>
+        <span style={{ color: "#8A8F98", marginLeft: "12px", fontSize: "11px" }}>
+          (Amazon x 0.84 − $10 − eBay cost)
+        </span>
+      </p>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "1000px" }}>
+          <thead>
+            <tr style={{ borderBottom: "2px solid var(--ink)" }}>
+              <th style={thStyle}>Product</th>
+              <th style={thStyle}>Category</th>
+              <th style={thStyle}>BSR</th>
+              <th style={thStyle}>Amazon $</th>
+              <th style={thStyle}>eBay cost $</th>
+              <th style={thStyle}>Net profit</th>
+              <th style={thStyle}>eBay buy date</th>
+              <th style={thStyle}>Amazon sell date</th>
+              <th style={thStyle}>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((r) => {
+              const amazonPrice = r.newPrice ?? r.usedPrice;
+              const profit = netProfit(amazonPrice, r.ebayCost);
+              return (
+                <tr key={r.asin} style={{ borderBottom: "1px solid var(--line)" }}>
+                  <td style={{ ...tdStyle, maxWidth: "260px" }}>
+                    <a href={r.amazonUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)" }}>
+                      {r.title}
+                    </a>
+                    <div className="font-mono" style={{ fontSize: "11px", color: "#8A8F98" }}>{r.asin}</div>
+                  </td>
+                  <td style={{ ...tdStyle, fontSize: "12px", color: "#5C6470" }}>{r.category || "-"}</td>
+                  <td className="font-mono" style={tdStyle}>{r.bsr ?? "-"}</td>
+                  <td className="font-mono" style={tdStyle}>{amazonPrice ? `$${amazonPrice.toFixed(2)}` : "-"}</td>
+                  <td style={tdStyle}>
+                    <input
+                      type="number"
+                      step="0.01"
+                      defaultValue={r.ebayCost ?? ""}
+                      onBlur={(e) => onUpdate(r.asin, "ebayCost", e.target.value)}
+                      style={cellInputStyle}
+                      placeholder="0.00"
+                    />
+                  </td>
+                  <td
+                    className="font-mono"
+                    style={{
+                      ...tdStyle,
+                      fontWeight: 600,
+                      color: profit === null ? "#8A8F98" : profit >= 0 ? "#2E7D46" : "#C0392B",
+                    }}
+                  >
+                    {profit === null ? "-" : `$${profit.toFixed(2)}`}
+                  </td>
+                  <td style={tdStyle}>
+                    <input
+                      type="date"
+                      defaultValue={r.ebayBuyDate ?? ""}
+                      onBlur={(e) => onUpdate(r.asin, "ebayBuyDate", e.target.value)}
+                      style={cellInputStyle}
+                    />
+                  </td>
+                  <td style={tdStyle}>
+                    <input
+                      type="date"
+                      defaultValue={r.amazonSellDate ?? ""}
+                      onBlur={(e) => onUpdate(r.asin, "amazonSellDate", e.target.value)}
+                      style={cellInputStyle}
+                    />
+                  </td>
+                  <td style={tdStyle}>
+                    <input
+                      type="text"
+                      defaultValue={r.notes ?? ""}
+                      onBlur={(e) => onUpdate(r.asin, "notes", e.target.value)}
+                      style={{ ...cellInputStyle, minWidth: "140px" }}
+                      placeholder="..."
+                    />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
 // --- Ortak stiller ---
+const cellInputStyle: CSSProperties = { width: "100%", minWidth: "90px", padding: "5px 7px", border: "1px solid var(--line)", borderRadius: "4px", fontSize: "13px", background: "#fff", fontFamily: "IBM Plex Mono, monospace" };
 const labelStyle: CSSProperties = { display: "block", fontSize: "12px", color: "#5C6470", marginBottom: "6px", fontWeight: 500 };
 const inputStyle: CSSProperties = { width: "100%", padding: "9px 12px", border: "1px solid var(--line)", borderRadius: "6px", fontSize: "14px", background: "#fff" };
 const thStyle: CSSProperties = { textAlign: "left", padding: "10px 12px", fontSize: "12px", color: "#5C6470", fontWeight: 500 };

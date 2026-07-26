@@ -40,7 +40,9 @@ const BOOKS_EXCLUDE_CATEGORIES = ["132424", "89185", "13664", "5479", "21152", "
 const MAX_OUT_OF_STOCK_90 = 25;
 
 // Kaç TAZE ürün detayı çekilsin (token maliyeti buna bağlı: ~1 token/ürün)
-const PER_PAGE = 100;
+// 25: tek seferde gözle kontrol edilebilir sayıda sonuç + token tasarrufu.
+// Kalanlar zaten "seen" olmadığı için bir sonraki aramada gelir, kaçan olmaz.
+const PER_PAGE = 25;
 
 // Seen (görüldü) süresi: bu süre içinde görülen ürün tekrar gösterilmez
 const SEEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 gün

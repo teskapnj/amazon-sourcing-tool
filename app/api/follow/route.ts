@@ -21,25 +21,43 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: error?.message || "Failed" }, { status: 500 });
   }
 }
-// PATCH: bir takip edilen ürünün "bought" (alındı) durumunu güncelle
+
+// PATCH: takip edilen bir ürünün "bought" durumunu VEYA satın alma takip alanlarını güncelle.
+// Güncellenebilir alanlar: bought, ebayCost (eBay alım maliyeti), ebayBuyDate (eBay alım tarihi),
+// amazonSellDate (Amazon satış tarihi), notes.
+// Sadece gönderilen alanlar güncellenir, diğerlerine dokunulmaz (merge: true).
 export async function PATCH(req: NextRequest) {
-    try {
-      const { asin, bought } = await req.json();
-      if (!asin) {
-        return NextResponse.json({ error: "ASIN required" }, { status: 400 });
-      }
-      // Sadece bought alanını güncelle, diğer verilere dokunma
-      await setDoc(
-        doc(db, "following", asin),
-        { bought: !!bought, boughtAt: bought ? Date.now() : null },
-        { merge: true }
-      );
-      return NextResponse.json({ success: true });
-    } catch (error: any) {
-      console.error("Update bought error:", error);
-      return NextResponse.json({ error: error?.message || "Failed" }, { status: 500 });
+  try {
+    const body = await req.json();
+    const { asin } = body;
+    if (!asin) {
+      return NextResponse.json({ error: "ASIN required" }, { status: 400 });
     }
+
+    const updates: Record<string, any> = {};
+
+    // bought durumu (varsa)
+    if ("bought" in body) {
+      updates.bought = !!body.bought;
+      updates.boughtAt = body.bought ? Date.now() : null;
+    }
+    // eBay alım maliyeti (sayı, boş bırakılırsa null)
+    if ("ebayCost" in body) {
+      const v = body.ebayCost;
+      updates.ebayCost = v === "" || v === null || v === undefined ? null : Number(v);
+    }
+    // Tarihler ve not (string alanlar)
+    if ("ebayBuyDate" in body) updates.ebayBuyDate = body.ebayBuyDate || null;
+    if ("amazonSellDate" in body) updates.amazonSellDate = body.amazonSellDate || null;
+    if ("notes" in body) updates.notes = body.notes || null;
+
+    await setDoc(doc(db, "following", asin), updates, { merge: true });
+    return NextResponse.json({ success: true });
+  } catch (error: any) {
+    console.error("Update following error:", error);
+    return NextResponse.json({ error: error?.message || "Failed" }, { status: 500 });
   }
+}
 
 // DELETE: takipten çıkar
 export async function DELETE(req: NextRequest) {
