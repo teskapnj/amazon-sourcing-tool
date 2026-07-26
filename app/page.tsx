@@ -264,6 +264,22 @@ export default function Home() {
     }
   }
 
+  // Seen'i tamamen sıfırla (tüm görüldü kayıtlarını sil)
+  async function handleClearSeen() {
+    if (!confirm("Delete ALL seen records? Products will appear in searches again.")) return;
+    try {
+      const res = await fetch("/api/seen/clear", { method: "POST" });
+      const data = await res.json();
+      if (data.success) {
+        setSeen([]);
+        alert(`Cleared ${data.deleted} seen records.`);
+      }
+    } catch (err) {
+      console.error("Clear seen failed:", err);
+      alert("Failed to clear seen records.");
+    }
+  }
+
   // Purchases sekmesi: satın alma takip alanlarını güncelle (eBay maliyeti, tarihler, not)
   async function handleUpdatePurchase(asin: string, field: string, value: string) {
     // Önce ekranda anında güncelle (kullanıcı beklemesin)
@@ -477,6 +493,14 @@ export default function Home() {
           <p style={{ color: "#8A8F98", fontSize: "14px" }}>No seen products yet. Opportunities you&apos;ve searched appear here and stay hidden for 30 days.</p>
         ) : (
           <>
+            <div style={{ marginBottom: "12px" }}>
+              <button
+                onClick={handleClearSeen}
+                style={{ background: "none", border: "1px solid #C0392B", color: "#C0392B", borderRadius: "4px", padding: "5px 12px", fontSize: "12px", cursor: "pointer" }}
+              >
+                Clear all seen ({seen.length})
+              </button>
+            </div>
             {seenCategories.length > 1 && (
               <div style={{ display: "flex", gap: "6px", marginBottom: "16px", flexWrap: "wrap" }}>
                 <FilterButton active={seenCategoryFilter === "all"} onClick={() => setSeenCategoryFilter("all")} label="All types" />
