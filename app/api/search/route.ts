@@ -36,6 +36,23 @@ const CATEGORIES: Record<string, { root: number; binding?: string; subCategory?:
 // + Medical Books (173514): tıp/hemşirelik/sağlık ders kitapları
 const BOOKS_EXCLUDE_CATEGORIES = ["132424", "89185", "13664", "5479", "21152", "3220", "75", "10777", "3344092011", "173514"];
 
+// ---- HAYALET BASIM FİLTRESİ: 180 günlük ortalama FBA'li NEW teklif sayısı ----
+// Doğrulanmış test verisi (2 hayalet / 2 gerçek çift):
+//   Hayalet-1: FBA'li New teklif 0   | Gerçek-1: 13
+//   Hayalet-2: FBA'li New teklif 1   | Gerçek-2: 13
+// FBA satıcı envanterini Amazon deposuna göndermek için para/emek harcar; bunu sadece
+// satacağına inandığı ürüne yapar. Hayalet basıma FBA satıcı uğramıyor.
+//
+// KRİTİK: Bu filtre FINDER sorgusunda uygulanıyor -> EK TOKEN YOK.
+// (Aynı bilgiyi ürün detayında "offers" parametresiyle almak ürün başına 1 yerine
+//  5 token yakıyordu - ölçüldü. Finder'da bedava.)
+// Alan adı Keepa Product Finder "SHOW API QUERY" ile doğrulandı.
+//
+// VINYL HARİÇ: limited/numbered baskılarda FBA satıcı olmaması NORMAL, orada bu filtre
+// gerçek fırsatları elerdi.
+const MIN_FBA_NEW_AVG180 = 1;
+const GHOST_FILTER_ROOTS = new Set([5174, 2625373011]); // CD/Kaset + Movies & TV
+
 // New teklifi son 90 günde bu orandan fazla stok dışıysa "hayalet listing" say, ele
 const MAX_OUT_OF_STOCK_90 = 25;
 
@@ -111,6 +128,11 @@ export async function POST(req: NextRequest) {
     // Platform bazlı alt kategori (ör. PS1) - varsa Finder'da rootCategory yerine bunu kullanırız
     const subCategory = categoryConfig.subCategory;
 
+    // Hayalet filtresi bu kategoride uygulanacak mı?
+    // (Vinyl hariç: limited edition'larda FBA satıcı olmaması normal)
+    const ghostFilterActive =
+      GHOST_FILTER_ROOTS.has(rootCategory) && category !== "Vinyl";
+
     // Education/textbook gürültüsünü TÜM kitap kategorilerinde ele
     // (Books, Biography ve ileride eklenecek diğer kitap alt kategorileri - hepsi kök 283155)
     const excludeCategories = rootCategory === 283155 ? BOOKS_EXCLUDE_CATEGORIES : [];
@@ -127,18 +149,21 @@ export async function POST(req: NextRequest) {
     const maxCentsQ = maxPrice && Number(maxPrice) > 0 ? Math.round(Number(maxPrice) * 100) : null;
 
     // Adım A: Product Finder sorguları.
-    // ESKİDEN: tek sorgu, New fiyatı olma ZORUNLUYDU (current_NEW_gte). Bu, gerçek "New" stoğu
-    // neredeyse hiç olmayan retro platformlarda (PS1, GameCube, Dreamcast vb.) havuzu
-    // Finder aşamasında sıfırlıyordu - kod tarafındaki filtre hiç devreye girmeden.
-    // ŞİMDİ: İKİ sorgu atıyoruz - biri New aralıkta olanlar, biri Used aralıkta olanlar.
-    // ASIN listeleri birleştirilip tekilleştirilir. (~+10 token, karşılığında New'i olmayan
-    // ürünler de havuza girebiliyor.)
+    // İKİ sorgu atıyoruz - biri New aralıkta olanlar, biri Used aralıkta olanlar.
+    // ASIN listeleri birleştirilip tekilleştirilir.
     const baseSelection = {
       productType: ["0"],
       singleVariation: true,
       rootCategory: String(rootCategory),
       categories_include: (Array.isArray(subCategory) ? subCategory : [subCategory ?? rootCategory]).map(String),
+      // BINDING FİLTRESİ FINDER'DA: CD/Vinyl/Kaset aynı kökü (5174) paylaşıyor.
+      // Kod tarafında filtrelersek çektiğimiz 25 ürünün yarısı yanlış türde çıkıp
+      // token boşa gidiyor (ölçüldü: 24 üründen 12'si eleniyordu).
+      ...(bindingFilter ? { binding: [bindingFilter] } : {}),
       ...(excludeCategories.length > 0 ? { categories_exclude: excludeCategories } : {}),
+      // HAYALET FİLTRESİ (bedava, Finder tarafında): son 180 günün ortalamasında
+      // en az 1 FBA'li New teklif görülmüş olsun. Hayalet basımlara FBA satıcı uğramıyor.
+      ...(ghostFilterActive ? { avg180_COUNT_NEW_FBA_gte: MIN_FBA_NEW_AVG180 } : {}),
       current_SALES_gte: Number(bsrMin),
       current_SALES_lte: Number(bsrMax),
       lastOffersUpdate_gte: lastOffersUpdate,
@@ -179,6 +204,8 @@ export async function POST(req: NextRequest) {
 
     const allAsins: string[] = Array.from(asinSet);
 
+    console.log(`[HUNI] 1) Finder toplam eşleşen: ${totalFound} | çekilen ASIN: ${allAsins.length}`);
+
     if (allAsins.length === 0) {
       return NextResponse.json({ results: [], tokensLeft, totalFound: totalFound || 0, scanned: 0 });
     }
@@ -186,6 +213,8 @@ export async function POST(req: NextRequest) {
     // Seen (son 30 günde görülmüş) ASIN'leri çek, Finder sonucundan ELE.
     const seenSet = await getFreshSeenAsins();
     const freshAsins = allAsins.filter((a) => !seenSet.has(a));
+
+    console.log(`[HUNI] 2) Seen elemesi sonrası taze ASIN: ${freshAsins.length} (${allAsins.length - freshAsins.length} tanesi daha önce görülmüş)`);
 
     if (freshAsins.length === 0) {
       return NextResponse.json({
@@ -199,9 +228,12 @@ export async function POST(req: NextRequest) {
 
     const asinsToFetch = freshAsins.slice(0, PER_PAGE);
 
-    // Adım B: taze ASIN'lerin detayını çek (100'erli parçalar)
+    // Adım B: taze ASIN'lerin detayını çek (100'erli parçalar).
+    // offers parametresi KULLANILMIYOR - hayalet filtresi artık Finder tarafında,
+    // bu yüzden ürün başına 1 token (offers ile 5 token yakıyordu).
     const asinChunks = chunk(asinsToFetch, 100);
     const allProducts: any[] = [];
+    const tokensBeforeProducts = tokensLeft; // gerçek maliyeti ölçmek için
 
     for (const group of asinChunks) {
       const productUrl = `https://api.keepa.com/product?key=${apiKey}&domain=1&asin=${group.join(",")}&stats=1&history=0&update=48`;
@@ -214,6 +246,9 @@ export async function POST(req: NextRequest) {
         tokensLeft = productData.tokensLeft;
       }
     }
+
+    const tokensUsedForProducts =
+      tokensBeforeProducts !== null && tokensLeft !== null ? tokensBeforeProducts - tokensLeft : null;
 
     function readBsr(p: any): number | null {
       const ref = p.salesRankReference;
@@ -228,6 +263,11 @@ export async function POST(req: NextRequest) {
 
     function cents(v: any): number | null {
       return typeof v === "number" && v > 0 ? v / 100 : null;
+    }
+
+    // Sayaç alanları: 0 geçerli bir değer, -1/-2 "veri yok" demek
+    function count(v: any): number | null {
+      return typeof v === "number" && v >= 0 ? v : null;
     }
 
     function buildEbayUrl(p: any): string {
@@ -263,6 +303,9 @@ export async function POST(req: NextRequest) {
         ebayUsedPrice: cents(current[29]),
         bsr: readBsr(p),
         newOutOfStock90,
+        // Teklif sayıları (BEDAVA - stats.current, bilgi amaçlı)
+        newOfferCount: count(current[11]),
+        usedOfferCount: count(current[12]),
         amazonUrl: `https://www.amazon.com/dp/${p.asin}`,
         keepaUrl: `https://keepa.com/#!product/1-${p.asin}`,
         ebayUrl: buildEbayUrl(p),
@@ -290,38 +333,40 @@ export async function POST(req: NextRequest) {
       return c >= minCentsQ && (maxCentsQ === null || c <= maxCentsQ);
     };
 
+    // Huni sayaçları - hangi filtre kaç ürün yiyor görmek için
+    let lostBinding = 0, lostRenewed = 0, lostTextbook = 0, lostPrice = 0, lostStock = 0;
+
     const results = dedupedResults
       .filter((r: any) => {
-        if (bindingFilter && r.binding !== bindingFilter) return false;
+        if (bindingFilter && r.binding !== bindingFilter) { lostBinding++; return false; }
 
-        // Oyun kategorilerinde (Video Games ve tüm platform alt kategorileri) "Renewed"
-        // (yenilenmiş/refurbished) ürünleri ele - bunlar gerçek sıfır New stok değil.
-        if (rootCategory === 468642 && /renewed/i.test(r.title || "")) return false;
+        // NOT: Hayalet filtresi (FBA'li New teklif) artık FINDER sorgusunda uygulanıyor,
+        // burada tekrar kontrol etmeye gerek yok.
+
+
+        // Oyun kategorilerinde "Renewed" (yenilenmiş) ürünleri ele
+        if (rootCategory === 468642 && /renewed/i.test(r.title || "")) { lostRenewed++; return false; }
 
         // Kitap kategorilerinde ders kitabı/akademik gürültüsünü başlıktan da ele
-        // (kategori filtresi bazılarını kaçırıyor)
         if (rootCategory === 283155) {
           const t = r.title || "";
-          // "5th Edition" gibi baskı numarası - ders kitaplarının en tipik işareti
-          if (/\b\d+(st|nd|rd|th)\s+edition\b/i.test(t)) return false;
-          // Doğrudan ders kitabı ifadeleri
-          if (/\btextbook\b|\bstudy guide\b|\bworkbook\b|\bsolutions? manual\b|\binstructor'?s\b|\bstudent edition\b|\btest bank\b|\blab manual\b|\bcourse\b/i.test(t)) return false;
-          // Akademik başlık kalıpları: "Elementary X", "Introduction to X", "Principles of X" vb.
-          if (/^(elementary|introduction to|introductory|principles of|fundamentals of|essentials of|foundations of|basic|advanced|applied|modern)\s/i.test(t)) return false;
-          // Tipik akademik konu adları başlıkta geçiyorsa
-          if (/\b(algebra|calculus|trigonometry|statistics|biochemistry|organic chemistry|microeconomics|macroeconomics|econometrics|thermodynamics|anatomy (and|&) physiology|pharmacology|psychology|sociology)\b/i.test(t)) return false;
+          if (/\b\d+(st|nd|rd|th)\s+edition\b/i.test(t)) { lostTextbook++; return false; }
+          if (/\btextbook\b|\bstudy guide\b|\bworkbook\b|\bsolutions? manual\b|\binstructor'?s\b|\bstudent edition\b|\btest bank\b|\blab manual\b|\bcourse\b/i.test(t)) { lostTextbook++; return false; }
+          if (/^(elementary|introduction to|introductory|principles of|fundamentals of|essentials of|foundations of|basic|advanced|applied|modern)\s/i.test(t)) { lostTextbook++; return false; }
+          if (/\b(algebra|calculus|trigonometry|statistics|biochemistry|organic chemistry|microeconomics|macroeconomics|econometrics|thermodynamics|anatomy (and|&) physiology|pharmacology|psychology|sociology)\b/i.test(t)) { lostTextbook++; return false; }
         }
 
-        // New fiyatı hiç YOKSA: fiyat aralığı kontrolü dahil hiçbir filtre uygulanmadan
-        // direkt geçirilir (retro platformlarda New zaten yok, elemeye gerek yok).
+        // New fiyatı hiç YOKSA: hiçbir filtre uygulanmadan direkt geçir
         if (r.newPrice === null) return true;
 
-        // New fiyatı VARSA: aralık kontrolü (New veya Used aralıkta olabilir) + stok kontrolü
+        // New fiyatı VARSA: aralık kontrolü + stok kontrolü
         const priceQualifies =
           inRange(r.newPrice) || (r.usedPrice !== null && inRange(r.usedPrice));
-        if (!priceQualifies) return false;
+        if (!priceQualifies) { lostPrice++; return false; }
 
-        return r.newOutOfStock90 !== null && r.newOutOfStock90 <= MAX_OUT_OF_STOCK_90;
+        const stockOk = r.newOutOfStock90 !== null && r.newOutOfStock90 <= MAX_OUT_OF_STOCK_90;
+        if (!stockOk) lostStock++;
+        return stockOk;
       })
       .map((r: any) => ({
         ...r,
@@ -333,10 +378,15 @@ export async function POST(req: NextRequest) {
       }))
       .sort((a: any, b: any) => (b.ratio ?? 0) - (a.ratio ?? 0));
 
+    console.log(
+      `[HUNI] 3) Detayı çekilen: ${allProducts.length} | BSR dedup sonrası: ${dedupedResults.length}\n` +
+      `[HUNI] 4) KAYIPLAR -> binding: ${lostBinding} | renewed: ${lostRenewed} | ders kitabı: ${lostTextbook} | fiyat: ${lostPrice} | stok: ${lostStock}\n` +
+      `[HUNI] 5) SONUÇ: ${results.length}\n` +
+      `[TOKEN] Ürün detayı için harcanan: ${tokensUsedForProducts ?? "?"} (${allProducts.length} ürün) | Kalan: ${tokensLeft} | Hayalet filtresi: ${ghostFilterActive ? "AÇIK (Finder'da, bedava)" : "kapalı"}`
+    );
+
     // Sadece KULLANICIYA GÖSTERİLEN fırsatları (results) seen'e kaydet - tam veriyle.
     // Böylece Seen sekmesinde arama sonucu tablosuyla birebir aynı görünümü gösteririz.
-    // (Not: fırsat çıkmayan ürünleri de "görüldü" saymak için ayrıca asinsToFetch'i de
-    //  işaretliyoruz ama onları sadece ASIN olarak - tabloda sadece fırsatlar görünecek.)
     await markSeen(results);
 
     // Fırsat çıkmayan taranan ürünleri de "görüldü" işaretle (sadece ASIN + tarih),
