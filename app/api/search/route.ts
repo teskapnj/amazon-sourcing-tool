@@ -114,10 +114,18 @@ async function markSeen(items: any[]) {
   await batch.commit().catch((e) => console.error("markSeen error:", e));
 }
 
+// Formdan gelen dolar değerini cent'e çevir. Boş/0/geçersizse null döner.
+function toCents(v: any): number | null {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.round(n * 100);
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { category, bsrMin, bsrMax, minPrice, maxPrice } = body;
+    const { category, bsrMin, bsrMax, minPrice, maxPrice, usedMinPrice, usedMaxPrice } = body;
 
     const categoryConfig = CATEGORIES[category];
     if (!categoryConfig) {
@@ -145,8 +153,17 @@ export async function POST(req: NextRequest) {
     const keepaNowMinutes = Math.floor(Date.now() / 60000) - 21564000;
     const lastOffersUpdate = keepaNowMinutes - 7 * 24 * 60;
 
-    const minCentsQ = Math.round(Number(minPrice) * 100);
-    const maxCentsQ = maxPrice && Number(maxPrice) > 0 ? Math.round(Number(maxPrice) * 100) : null;
+    // --- FİYAT ARALIKLARI: New ve Used AYRI ---
+    // Used alanları boş bırakılırsa New aralığı Used için de kullanılır (eski davranış).
+    const newMinCents = toCents(minPrice) ?? 0;
+    const newMaxCents = toCents(maxPrice);
+
+    const usedMinRaw = toCents(usedMinPrice);
+    const usedMaxRaw = toCents(usedMaxPrice);
+    const usedRangeGiven = usedMinRaw !== null || usedMaxRaw !== null;
+
+    const usedMinCents = usedRangeGiven ? (usedMinRaw ?? 0) : newMinCents;
+    const usedMaxCents = usedRangeGiven ? usedMaxRaw : newMaxCents;
 
     // Adım A: Product Finder sorguları.
     // İKİ sorgu atıyoruz - biri New aralıkta olanlar, biri Used aralıkta olanlar.
@@ -172,18 +189,32 @@ export async function POST(req: NextRequest) {
       sort: [["current_SALES", "asc"]],
     };
 
-    const selections = [
-      {
-        ...baseSelection,
-        current_NEW_gte: minCentsQ,
-        ...(maxCentsQ ? { current_NEW_lte: maxCentsQ } : {}),
-      },
-      {
-        ...baseSelection,
-        current_USED_gte: minCentsQ,
-        ...(maxCentsQ ? { current_USED_lte: maxCentsQ } : {}),
-      },
-    ];
+    // Used aralığı ELLE GİRİLDİYSE tek sorgu: New VE Used aynı anda aralıkta olsun
+    // (Keepa aynı sorgudaki alanlara AND uygular). Hem 10 token tasarrufu,
+    // hem de detayı çekilen 25 ürünün tamamı gerçek aday oluyor.
+    // Girilmediyse eski davranış: iki ayrı sorgu (New aralıkta OLANLAR + Used aralıkta OLANLAR).
+    const selections = usedRangeGiven
+      ? [
+          {
+            ...baseSelection,
+            current_NEW_gte: newMinCents,
+            ...(newMaxCents !== null ? { current_NEW_lte: newMaxCents } : {}),
+            current_USED_gte: usedMinCents,
+            ...(usedMaxCents !== null ? { current_USED_lte: usedMaxCents } : {}),
+          },
+        ]
+      : [
+          {
+            ...baseSelection,
+            current_NEW_gte: newMinCents,
+            ...(newMaxCents !== null ? { current_NEW_lte: newMaxCents } : {}),
+          },
+          {
+            ...baseSelection,
+            current_USED_gte: usedMinCents,
+            ...(usedMaxCents !== null ? { current_USED_lte: usedMaxCents } : {}),
+          },
+        ];
 
     const finderUrl = `https://api.keepa.com/query?domain=1&key=${apiKey}`;
     let tokensLeft: number | null = null;
@@ -204,6 +235,10 @@ export async function POST(req: NextRequest) {
 
     const allAsins: string[] = Array.from(asinSet);
 
+    console.log(
+      `[HUNI] 0) Fiyat aralıkları -> New: ${newMinCents / 100}$ - ${newMaxCents === null ? "∞" : newMaxCents / 100 + "$"} | ` +
+      `Used: ${usedMinCents / 100}$ - ${usedMaxCents === null ? "∞" : usedMaxCents / 100 + "$"}${usedRangeGiven ? "" : " (New'den miras)"}`
+    );
     console.log(`[HUNI] 1) Finder toplam eşleşen: ${totalFound} | çekilen ASIN: ${allAsins.length}`);
 
     if (allAsins.length === 0) {
@@ -327,10 +362,14 @@ export async function POST(req: NextRequest) {
     });
 
     // Fiyat aralığı kontrolü (dolar -> cent). Artık ORAN FİLTRE DEĞİL, sadece tabloda
-    // bilgi amaçlı gösteriliyor. Ürün, New VEYA Used fiyatından biri aralıktaysa listeye girer.
-    const inRange = (dollars: number) => {
+    // bilgi amaçlı gösteriliyor. Ürün, New VEYA Used fiyatından biri KENDİ aralığındaysa listeye girer.
+    const inNewRange = (dollars: number) => {
       const c = Math.round(dollars * 100);
-      return c >= minCentsQ && (maxCentsQ === null || c <= maxCentsQ);
+      return c >= newMinCents && (newMaxCents === null || c <= newMaxCents);
+    };
+    const inUsedRange = (dollars: number) => {
+      const c = Math.round(dollars * 100);
+      return c >= usedMinCents && (usedMaxCents === null || c <= usedMaxCents);
     };
 
     // Huni sayaçları - hangi filtre kaç ürün yiyor görmek için
@@ -356,13 +395,20 @@ export async function POST(req: NextRequest) {
           if (/\b(algebra|calculus|trigonometry|statistics|biochemistry|organic chemistry|microeconomics|macroeconomics|econometrics|thermodynamics|anatomy (and|&) physiology|pharmacology|psychology|sociology)\b/i.test(t)) { lostTextbook++; return false; }
         }
 
-        // New fiyatı hiç YOKSA: hiçbir filtre uygulanmadan direkt geçir
-        if (r.newPrice === null) return true;
+        // --- FİYAT FİLTRESİ ---
+        // Used aralığı ELLE GİRİLDİYSE: Used fiyatı zorunlu ve aralıkta olmalı (AND).
+        // Girilmediyse eski davranış: New VEYA Used aralıktaysa geçer (OR).
+        if (usedRangeGiven) {
+          if (r.usedPrice === null || !inUsedRange(r.usedPrice)) { lostPrice++; return false; }
+          if (r.newPrice !== null && !inNewRange(r.newPrice)) { lostPrice++; return false; }
+        } else if (r.newPrice !== null) {
+          const priceQualifies =
+            inNewRange(r.newPrice) || (r.usedPrice !== null && inUsedRange(r.usedPrice));
+          if (!priceQualifies) { lostPrice++; return false; }
+        }
 
-        // New fiyatı VARSA: aralık kontrolü + stok kontrolü
-        const priceQualifies =
-          inRange(r.newPrice) || (r.usedPrice !== null && inRange(r.usedPrice));
-        if (!priceQualifies) { lostPrice++; return false; }
+        // New fiyatı yoksa stok kontrolü yapılamaz - geçir
+        if (r.newPrice === null) return true;
 
         const stockOk = r.newOutOfStock90 !== null && r.newOutOfStock90 <= MAX_OUT_OF_STOCK_90;
         if (!stockOk) lostStock++;

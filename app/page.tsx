@@ -62,6 +62,9 @@ export default function Home() {
   const [bsrMax, setBsrMax] = useState("300000");
   const [minPrice, setMinPrice] = useState("90");
   const [maxPrice, setMaxPrice] = useState("");
+  // Used fiyat aralığı - boş bırakılırsa New aralığı Used için de kullanılır
+  const [usedMinPrice, setUsedMinPrice] = useState("");
+  const [usedMaxPrice, setUsedMaxPrice] = useState("");
   const [results, setResults] = useState<ResultItem[]>([]);
   const [hasSearched, setHasSearched] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -163,7 +166,7 @@ export default function Home() {
       const res = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ category, bsrMin, bsrMax, minPrice, maxPrice }),
+        body: JSON.stringify({ category, bsrMin, bsrMax, minPrice, maxPrice, usedMinPrice, usedMaxPrice }),
       });
       const data = await res.json();
       setResults(data.results || []);
@@ -358,12 +361,20 @@ export default function Home() {
             <input type="number" value={bsrMax} onChange={(e) => setBsrMax(e.target.value)} style={{ ...inputStyle, fontFamily: "IBM Plex Mono, monospace" }} placeholder="300000" />
           </div>
           <div>
-            <label style={labelStyle}>Min. price ($)</label>
+            <label style={labelStyle}>New price - min ($)</label>
             <input type="number" value={minPrice} onChange={(e) => setMinPrice(e.target.value)} style={{ ...inputStyle, fontFamily: "IBM Plex Mono, monospace" }} placeholder="90" />
           </div>
           <div>
-            <label style={labelStyle}>Max. price ($)</label>
+            <label style={labelStyle}>New price - max ($)</label>
             <input type="number" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} style={{ ...inputStyle, fontFamily: "IBM Plex Mono, monospace" }} placeholder="no limit" />
+          </div>
+          <div>
+            <label style={labelStyle}>Used price - min ($)</label>
+            <input type="number" value={usedMinPrice} onChange={(e) => setUsedMinPrice(e.target.value)} style={{ ...inputStyle, fontFamily: "IBM Plex Mono, monospace" }} placeholder="same as new" />
+          </div>
+          <div>
+            <label style={labelStyle}>Used price - max ($)</label>
+            <input type="number" value={usedMaxPrice} onChange={(e) => setUsedMaxPrice(e.target.value)} style={{ ...inputStyle, fontFamily: "IBM Plex Mono, monospace" }} placeholder="same as new" />
           </div>
         </div>
         <button type="submit" disabled={loading} style={{ background: "var(--ink)", color: "#fff", border: "none", borderRadius: "6px", padding: "12px 28px", fontSize: "14px", fontWeight: 500, cursor: "pointer" }}>
