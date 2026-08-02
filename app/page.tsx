@@ -36,6 +36,10 @@ type ResultItem = {
   usedAvg90?: number | null;
   ebayNewPrice: number | null;
   ebayUsedPrice: number | null;
+  // Arama sırasında otomatik çekilen CANLI eBay fiyatları
+  ebayLiveNew?: number | null;
+  ebayLiveUsed?: number | null;
+  ebayLiveUrl?: string | null;
   ratio: number | null;
   amazonUrl: string;
   keepaUrl: string;
@@ -48,7 +52,35 @@ type ResultItem = {
   notes?: string | null;
 };
 
-type Tab = "search" | "following" | "purchases" | "dismissed" | "seen";
+type Tab = "search" | "following" | "purchases" | "dismissed" | "seen" | "seller";
+
+// eBay satıcı taramasında bir satır: eBay listing + Keepa (Amazon) verisi yan yana
+type SellerItem = {
+  itemId: string;
+  ebayTitle: string;
+  ebayPrice: number | null;
+  ebayCondition: string | null;
+  ebayUrl: string | null;
+  ebayCategory: string;
+  code: string | null;
+  noCode?: boolean;
+  batchId?: number;
+  asin?: string;
+  title?: string;
+  binding?: string | null;
+  bsr?: number | null;
+  newPrice?: number | null;
+  usedPrice?: number | null;
+  newAvg90?: number | null;
+  usedAvg90?: number | null;
+  amazonUrl?: string;
+  keepaUrl?: string;
+  seller: string;
+};
+
+// Amazon New fiyatı ile canlı eBay Used fiyatı arasındaki fark bu değer veya
+// üzerindeyse satır mavi vurgulanır (fırsat sinyali).
+const EBAY_SPREAD_HIGHLIGHT = 90;
 
 // Sıralanabilir sütunlar - tabloda tıklanabilir başlıklar bu anahtarlarla eşleşir
 type SortKey = "bsr" | "newPrice" | "newAvg90" | "usedPrice" | "usedAvg90" | "ratio";
@@ -85,11 +117,22 @@ export default function Home() {
   const [seen, setSeen] = useState<ResultItem[]>([]);
   const [seenCategoryFilter, setSeenCategoryFilter] = useState<string>("all");
 
+  // eBay satıcı taraması
+  const [sellerName, setSellerName] = useState("");
+  const [sellerItems, setSellerItems] = useState<SellerItem[]>([]);
+  const [sellerLoading, setSellerLoading] = useState(false);
+  const [sellerStatus, setSellerStatus] = useState<string | null>(null);
+  // Seller Scan "Seen": önceki taramalar. Butona basınca açılır/kapanır.
+  const [showSellerSeen, setShowSellerSeen] = useState(false);
+  // Tarama kategorisi: "all" veya eBay kategori ID'si
+  const [sellerCategory, setSellerCategory] = useState("all");
+
   // Sayfa açılınca listeleri yükle
   useEffect(() => {
     loadDismissed();
     loadFollowing();
     loadSeen();
+    loadSellerScan();
     // En son tıklanan ürünü localStorage'dan yükle
     try {
       const stored = localStorage.getItem("lastClickedAsin");
@@ -130,6 +173,62 @@ export default function Home() {
       setFollowedAsins(new Set(items.map((it: any) => it.asin)));
     } catch (err) {
       console.error("Failed to load following:", err);
+    }
+  }
+
+  async function loadSellerScan() {
+    try {
+      const res = await fetch("/api/seller-scan");
+      const data = await res.json();
+      setSellerItems(data.items || []);
+    } catch (err) {
+      console.error("Failed to load seller scan:", err);
+    }
+  }
+
+  // Sıradaki 100 listing'i tara (kaldığı yerden devam eder, sonuçlar birikir)
+  async function handleSellerScan(restart = false) {
+    const name = sellerName.trim();
+    if (!name) return;
+    setSellerLoading(true);
+    setSellerStatus(null);
+    try {
+      const res = await fetch("/api/seller-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seller: name, restart, category: sellerCategory }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setSellerStatus(`Error: ${data.error}`);
+      } else {
+        setSellerStatus(
+         `Scanned ${data.scanned} listings · ${data.added} matched on Amazon · ${data.noCode ?? 0} without barcode` +
+            (data.done ? " · ALL LISTINGS DONE" : "")
+        );
+      }
+      loadSellerScan();
+    } catch (err) {
+      console.error("Seller scan failed:", err);
+      setSellerStatus("Scan request failed.");
+    } finally {
+      setSellerLoading(false);
+    }
+  }
+
+  // Tüm tarama sonuçlarını sil (ilerleme de sıfırlanır)
+  async function handleClearSellerScan() {
+    if (!confirm("Delete ALL seller scan results? Scan progress will reset too.")) return;
+    try {
+      const res = await fetch("/api/seller-scan", { method: "DELETE" });
+      const data = await res.json();
+      if (data.success) {
+        setSellerItems([]);
+        setSellerStatus(null);
+        alert(`Cleared ${data.deleted} records.`);
+      }
+    } catch (err) {
+      console.error("Clear seller scan failed:", err);
     }
   }
 
@@ -315,6 +414,11 @@ export default function Home() {
   const followingCategories = Array.from(new Set(following.map((f) => f.category).filter(Boolean))) as string[];
 
   const filteredSeen = seen.filter((s) => seenCategoryFilter === "all" || s.category === seenCategoryFilter);
+
+  // Seller Scan: en son taramanın ürünleri ana tabloda, öncekiler "Seen" listesinde
+  const latestBatchId = sellerItems.reduce((max, i) => Math.max(max, i.batchId ?? 0), 0);
+  const sellerLatest = sellerItems.filter((i) => (i.batchId ?? 0) === latestBatchId);
+  const sellerSeen = sellerItems.filter((i) => (i.batchId ?? 0) !== latestBatchId);
   const filteredFollowing = following.filter((f) => {
     const categoryOk = followCategoryFilter === "all" || f.category === followCategoryFilter;
     const boughtOk =
@@ -389,6 +493,7 @@ export default function Home() {
         <TabButton active={tab === "purchases"} onClick={() => setTab("purchases")} label={`Purchases (${purchases.length})`} />
         <TabButton active={tab === "dismissed"} onClick={() => setTab("dismissed")} label={`Dismissed (${dismissed.length})`} />
         <TabButton active={tab === "seen"} onClick={() => setTab("seen")} label={`Seen (${seen.length})`} />
+        <TabButton active={tab === "seller"} onClick={() => setTab("seller")} label={`Seller Scan (${sellerItems.length})`} />
       </div>
 
       {/* SEARCH (RESULTS) SEKMESİ */}
@@ -520,7 +625,7 @@ export default function Home() {
                 ))}
               </div>
             )}
-            {filteredSeen.length === 0 ? (
+           {filteredSeen.length === 0 ? (
               <p style={{ color: "#8A8F98", fontSize: "14px" }}>No items match this filter.</p>
             ) : (
               <ResultsTable
@@ -535,6 +640,100 @@ export default function Home() {
             )}
           </>
         )
+      )}
+
+      {/* SELLER SCAN SEKMESİ - bir eBay satıcısının listing'lerini Amazon ile eşleştirir */}
+      {tab === "seller" && (
+        <>
+          <div style={{ background: "var(--card)", border: "1px solid var(--line)", borderRadius: "10px", padding: "20px", marginBottom: "20px" }}>
+            <div style={{ display: "flex", gap: "12px", alignItems: "flex-end", flexWrap: "wrap" }}>
+              <div style={{ flex: "1 1 240px" }}>
+                <label style={labelStyle}>eBay seller username</label>
+                <input
+                  type="text"
+                  value={sellerName}
+                  onChange={(e) => setSellerName(e.target.value)}
+                  style={{ ...inputStyle, fontFamily: "IBM Plex Mono, monospace" }}
+                  placeholder="e.g. bosie97"
+                />
+              </div>
+              <div style={{ flex: "0 1 170px" }}>
+                <label style={labelStyle}>Category</label>
+                <select value={sellerCategory} onChange={(e) => setSellerCategory(e.target.value)} style={inputStyle}>
+                  <option value="all">All</option>
+                  <option value="267">Books</option>
+                  <option value="11233">Music (CD/Vinyl)</option>
+                  <option value="11232">Movies & TV</option>
+                  <option value="1249">Video Games</option>
+                </select>
+              </div>
+              <button
+                onClick={() => handleSellerScan(false)}
+                disabled={sellerLoading || !sellerName.trim()}
+                style={{ background: "var(--ink)", color: "#fff", border: "none", borderRadius: "6px", padding: "11px 22px", fontSize: "14px", fontWeight: 500, cursor: "pointer", opacity: sellerLoading ? 0.6 : 1 }}
+              >
+                {sellerLoading ? "Scanning..." : "Scan next 100"}
+              </button>
+              <button
+                onClick={() => handleSellerScan(true)}
+                disabled={sellerLoading || !sellerName.trim()}
+                style={{ ...smallBtnStyle, padding: "10px 16px", fontSize: "13px" }}
+                title="Start again from the first listing"
+              >
+                restart
+              </button>
+              {sellerSeen.length > 0 && (
+                <button
+                  onClick={() => setShowSellerSeen((v) => !v)}
+                  style={{ ...smallBtnStyle, padding: "10px 16px", fontSize: "13px", color: showSellerSeen ? "var(--pine)" : "#999", borderColor: showSellerSeen ? "var(--pine)" : "var(--line)" }}
+                >
+                  {showSellerSeen ? "hide" : "seen"} ({sellerSeen.length})
+                </button>
+              )}
+              {sellerItems.length > 0 && (
+                <button
+                  onClick={handleClearSellerScan}
+                  style={{ background: "none", border: "1px solid #C0392B", color: "#C0392B", borderRadius: "4px", padding: "10px 16px", fontSize: "13px", cursor: "pointer" }}
+                >
+                  Clear all ({sellerItems.length})
+                </button>
+              )}
+            </div>
+            <p className="font-mono" style={{ fontSize: "11px", color: "#8A8F98", marginTop: "12px", marginBottom: 0 }}>
+              Each click scans 100 more listings and continues where it left off. Only items found on Amazon are saved.
+            </p>
+            {sellerStatus && (
+              <p className="font-mono" style={{ fontSize: "12px", color: "var(--pine)", marginTop: "8px", marginBottom: 0 }}>
+                {sellerStatus}
+              </p>
+            )}
+          </div>
+
+          {sellerItems.length === 0 ? (
+            <p style={{ color: "#8A8F98", fontSize: "14px" }}>
+              No scan results yet. Enter a seller username and click &quot;Scan next 100&quot;.
+            </p>
+          ) : (
+            <>
+              {sellerLatest.length > 0 && (
+                <>
+                  <p className="font-mono" style={{ fontSize: "12px", color: "#8A8F98", marginBottom: "8px" }}>
+                    Latest scan · {sellerLatest.length} items
+                  </p>
+                  <SellerTable items={sellerLatest} />
+                </>
+              )}
+              {showSellerSeen && sellerSeen.length > 0 && (
+                <div style={{ marginTop: "32px", paddingTop: "24px", borderTop: "2px dashed var(--line)" }}>
+                  <p className="font-mono" style={{ fontSize: "12px", color: "#8A8F98", marginBottom: "8px" }}>
+                    Previously scanned · {sellerSeen.length} items
+                  </p>
+                  <SellerTable items={sellerSeen} />
+                </div>
+              )}
+            </>
+          )}
+        </>
       )}
     </main>
   );
@@ -639,26 +838,6 @@ function ResultsTable({
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
-  // Canlı eBay fiyatları (buton'a basınca dolan) - asin -> sonuç
-  type EbayData = { newLowest: number | null; usedLowest: number | null; newCount: number; usedCount: number; url: string; noCode?: boolean };
-  const [ebayResults, setEbayResults] = useState<Record<string, EbayData | "loading" | "error">>({});
-
-  async function checkEbay(asin: string, title: string, upc?: string | null) {
-    setEbayResults((prev) => ({ ...prev, [asin]: "loading" }));
-    try {
-      const res = await fetch("/api/ebay-price", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, upc }),
-      });
-      if (!res.ok) throw new Error("eBay request failed");
-      const data = await res.json();
-      setEbayResults((prev) => ({ ...prev, [asin]: data }));
-    } catch (err) {
-      console.error("eBay check failed:", err);
-      setEbayResults((prev) => ({ ...prev, [asin]: "error" }));
-    }
-  }
 
   function handleSort(key: SortKey) {
     if (sortKey === key) {
@@ -707,7 +886,22 @@ function ResultsTable({
       </thead>
       <tbody>
         {sortedItems.map((r) => (
-          <tr key={r.asin} onClick={() => onItemClick && onItemClick(r.asin)} style={{ borderBottom: "1px solid var(--line)", cursor: "pointer", background: r.bought ? "#E9F5EC" : lastClickedAsin === r.asin ? "#BBF7D0" : "transparent" }}>
+         <tr
+         key={r.asin}
+         onClick={() => onItemClick && onItemClick(r.asin)}
+         style={{
+           borderBottom: "1px solid var(--line)",
+           cursor: "pointer",
+           // Öncelik: bought > son tıklanan > FIRSAT (Amazon New - eBay Used >= $90) > yok
+           background: r.bought
+             ? "#E9F5EC"
+             : lastClickedAsin === r.asin
+             ? "#BBF7D0"
+             : r.newPrice != null && r.ebayLiveUsed != null && r.newPrice - r.ebayLiveUsed >= EBAY_SPREAD_HIGHLIGHT
+             ? "rgba(59, 130, 246, 0.14)"
+             : "transparent",
+         }}
+       >
             <td style={tdStyle}>
               <a href={r.amazonUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)" }}>{r.title}</a>
             </td>
@@ -721,34 +915,24 @@ function ResultsTable({
               {r.usedAvg90 ? `$${r.usedAvg90.toFixed(2)}` : "-"}
             </td>
             {(() => {
-              const eb = ebayResults[r.asin];
-              const done = eb && eb !== "loading" && eb !== "error";
-              const noCode = done && (eb as any).noCode;
-              const newTxt =
-                eb === "loading" ? "..." :
-                eb === "error" ? "err" :
-                noCode ? "no code" :
-                done ? (eb.newLowest !== null ? `$${eb.newLowest.toFixed(2)}` : "-") : "";
-              const usedTxt =
-                eb === "loading" ? "..." :
-                eb === "error" ? "err" :
-                noCode ? "-" :
-                done ? (eb.usedLowest !== null ? `$${eb.usedLowest.toFixed(2)}` : "-") : "";
-              const link = done && !noCode ? (eb as any).url : null;
+              // Canlı eBay fiyatları artık arama sırasında otomatik geliyor (buton yok).
+              // Kodu (UPC/ISBN) olmayan ürünlerde alan hiç dolmaz -> "no code"
+              const hasCode = !!r.upc;
+              const newTxt = r.ebayLiveNew != null ? `$${r.ebayLiveNew.toFixed(2)}` : hasCode ? "-" : "no code";
+              const usedTxt = r.ebayLiveUsed != null ? `$${r.ebayLiveUsed.toFixed(2)}` : "-";
+              const link = r.ebayLiveUrl || null;
               return (
                 <>
                   <td className="font-mono" style={tdStyle}>
                     {link ? (
-                      <a href={link} target="_blank" rel="noopener noreferrer" style={{ color: newTxt === "-" ? "#B0B4BA" : "var(--pine)" }}>{newTxt}</a>
-                    ) : noCode ? (
-                      <span style={{ color: "#B0B4BA", fontSize: "12px" }}>{newTxt}</span>
+                      <a href={link} target="_blank" rel="noopener noreferrer" style={{ color: r.ebayLiveNew != null ? "var(--pine)" : "#B0B4BA" }}>{newTxt}</a>
                     ) : (
-                      <button onClick={() => checkEbay(r.asin, r.title, r.upc)} style={{ ...smallBtnStyle, fontSize: "11px" }}>check</button>
+                      <span style={{ color: "#B0B4BA", fontSize: "12px" }}>{newTxt}</span>
                     )}
                   </td>
                   <td className="font-mono" style={tdStyle}>
                     {link ? (
-                      <a href={link} target="_blank" rel="noopener noreferrer" style={{ color: usedTxt === "-" ? "#B0B4BA" : "var(--pine)" }}>{usedTxt}</a>
+                      <a href={link} target="_blank" rel="noopener noreferrer" style={{ color: r.ebayLiveUsed != null ? "var(--pine)" : "#B0B4BA" }}>{usedTxt}</a>
                     ) : usedTxt}
                   </td>
                 </>
@@ -799,6 +983,144 @@ function ResultsTable({
         ))}
       </tbody>
     </table>
+  );
+}
+
+// --- eBay satıcı tarama tablosu (Seller Scan sekmesi) ---
+// eBay listing fiyatı ile Amazon (Keepa) fiyatları yan yana. Spread = Amazon New - eBay fiyatı.
+type SellerSortKey = "ebayPrice" | "newPrice" | "usedPrice" | "bsr" | "spread";
+
+function SellerTable({ items }: { items: SellerItem[] }) {
+  const [sortKey, setSortKey] = useState<SellerSortKey | null>("spread");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+
+  function spreadOf(r: SellerItem): number | null {
+    if (r.newPrice == null || r.ebayPrice == null) return null;
+    return Math.round((r.newPrice - r.ebayPrice) * 100) / 100;
+  }
+
+  function handleSort(key: SellerSortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  }
+
+  const categories = Array.from(new Set(items.map((i) => i.ebayCategory).filter(Boolean)));
+  const filtered = items.filter((i) => categoryFilter === "all" || i.ebayCategory === categoryFilter);
+
+  const sorted = useMemo(() => {
+    if (!sortKey) return filtered;
+    const withIndex = filtered.map((item, idx) => ({ item, idx }));
+    withIndex.sort((a, b) => {
+      const av = sortKey === "spread" ? spreadOf(a.item) : a.item[sortKey];
+      const bv = sortKey === "spread" ? spreadOf(b.item) : b.item[sortKey];
+      const aNull = av === null || av === undefined;
+      const bNull = bv === null || bv === undefined;
+      if (aNull && bNull) return a.idx - b.idx;
+      if (aNull) return 1;
+      if (bNull) return -1;
+      const diff = (av as number) - (bv as number);
+      if (diff !== 0) return sortDir === "asc" ? diff : -diff;
+      return a.idx - b.idx;
+    });
+    return withIndex.map((w) => w.item);
+  }, [filtered, sortKey, sortDir]);
+
+  function SortTh({ label, k }: { label: string; k: SellerSortKey }) {
+    const isActive = sortKey === k;
+    return (
+      <th onClick={() => handleSort(k)} style={{ ...thStyle, cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" }}>
+        {label}
+        <span style={{ marginLeft: "4px", color: isActive ? "var(--ink)" : "#C4C9D0", fontSize: "10px" }}>
+          {isActive ? (sortDir === "asc" ? "▲" : "▼") : "▲▼"}
+        </span>
+      </th>
+    );
+  }
+
+  return (
+    <>
+      {categories.length > 1 && (
+        <div style={{ display: "flex", gap: "6px", marginBottom: "16px", flexWrap: "wrap" }}>
+          <FilterButton active={categoryFilter === "all"} onClick={() => setCategoryFilter("all")} label="All types" />
+          {categories.map((c) => (
+            <FilterButton key={c} active={categoryFilter === c} onClick={() => setCategoryFilter(c)} label={c} />
+          ))}
+        </div>
+      )}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "1000px" }}>
+          <thead>
+            <tr style={{ borderBottom: "2px solid var(--ink)" }}>
+              <th style={thStyle}>Product</th>
+              <th style={thStyle}>Cond.</th>
+              <SortTh label="eBay $" k="ebayPrice" />
+              <SortTh label="Amazon New" k="newPrice" />
+              <SortTh label="Amazon Used" k="usedPrice" />
+              <SortTh label="Spread" k="spread" />
+              <SortTh label="BSR" k="bsr" />
+              <th style={thStyle}>Links</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((r) => {
+              const spread = spreadOf(r);
+              return (
+                <tr
+                  key={r.itemId}
+                  style={{
+                    borderBottom: "1px solid var(--line)",
+                    background: spread != null && spread >= EBAY_SPREAD_HIGHLIGHT ? "rgba(59, 130, 246, 0.14)" : "transparent",
+                  }}
+                >
+                  <td style={{ ...tdStyle, maxWidth: "320px" }}>
+                    {r.ebayUrl ? (
+                      <a href={r.ebayUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)" }}>{r.ebayTitle}</a>
+                    ) : (
+                      r.ebayTitle
+                    )}
+                    <div className="font-mono" style={{ fontSize: "11px", color: "#8A8F98" }}>
+                      {r.code} · {r.ebayCategory}
+                    </div>
+                  </td>
+                  <td style={{ ...tdStyle, fontSize: "12px", color: "#5C6470" }}>{r.ebayCondition || "-"}</td>
+                  <td className="font-mono" style={tdStyle}>{r.ebayPrice != null ? `$${r.ebayPrice.toFixed(2)}` : "-"}</td>
+                  <td className="font-mono" style={tdStyle}>{r.newPrice != null ? `$${r.newPrice.toFixed(2)}` : "-"}</td>
+                  <td className="font-mono" style={tdStyle}>{r.usedPrice != null ? `$${r.usedPrice.toFixed(2)}` : "-"}</td>
+                  <td className="font-mono" style={{ ...tdStyle, fontWeight: 600, color: spread == null ? "#8A8F98" : spread >= 0 ? "#2E7D46" : "#C0392B" }}>
+                    {spread == null ? "-" : `$${spread.toFixed(2)}`}
+                  </td>
+                  <td className="font-mono" style={tdStyle}>{r.bsr ?? "-"}</td>
+                  <td style={tdStyle}>
+                  <div style={{ display: "flex", gap: "8px", fontSize: "12px" }}>
+                      {r.amazonUrl ? (
+                        <a href={r.amazonUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)" }}>amz</a>
+                      ) : (
+                        // Kodu olmayan ürünlerde ASIN yok -> başlıkla Amazon araması aç (gözle kontrol)
+                        
+                        <a href={`https://www.amazon.com/s?k=${encodeURIComponent(r.ebayTitle)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: "#C77700" }}
+                          title="Search Amazon by title (no barcode)"
+                        >
+                          amz?
+                        </a>
+                      )}
+                      {r.keepaUrl && <a href={r.keepaUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--pine)" }}>chart</a>}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }
 

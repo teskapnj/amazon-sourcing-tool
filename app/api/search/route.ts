@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/firebase";
 import { collection, getDocs, doc, writeBatch } from "firebase/firestore";
+import { ebayConfigured, getEbayToken, ebayPricesForCode } from "@/lib/ebay";
 
 // Her kategori: Keepa kök kategori numarası + (opsiyonel) binding filtresi.
 // CDs & Vinyl kök kategorisi (5174) CD/Plak/Kaset karışık geliyor,
@@ -55,6 +56,10 @@ const GHOST_FILTER_ROOTS = new Set([5174, 2625373011]); // CD/Kaset + Movies & T
 
 // New teklifi son 90 günde bu orandan fazla stok dışıysa "hayalet listing" say, ele
 const MAX_OUT_OF_STOCK_90 = 25;
+
+// Aynı anda kaç ürün için eBay sorgusu atılsın (her ürün = 2 istek: New + Used).
+// eBay Browse API limiti: 5000 istek/gün.
+const EBAY_CONCURRENCY = 8;
 
 // Kaç TAZE ürün detayı çekilsin (token maliyeti buna bağlı: ~1 token/ürün)
 // 25: tek seferde gözle kontrol edilebilir sayıda sonuç + token tasarrufu.
@@ -423,6 +428,36 @@ export async function POST(req: NextRequest) {
             : null,
       }))
       .sort((a: any, b: any) => (b.ratio ?? 0) - (a.ratio ?? 0));
+
+    // --- CANLI eBAY FİYATLARI ---
+    // Filtreleme SONRASI çalışır: sadece tabloya girecek ürünler sorgulanır (boşa istek yok).
+    // UPC/ISBN'i olmayan ürünler atlanır (kod olmadan eBay araması alakasız sonuç veriyor).
+    if (ebayConfigured() && results.length > 0) {
+      try {
+        const token = await getEbayToken();
+        const withCode = results.filter((r: any) => r.upc);
+        for (let i = 0; i < withCode.length; i += EBAY_CONCURRENCY) {
+          const batchItems = withCode.slice(i, i + EBAY_CONCURRENCY);
+          await Promise.all(
+            batchItems.map(async (r: any) => {
+              try {
+                const eb = await ebayPricesForCode(token, String(r.upc));
+                r.ebayLiveNew = eb.newLowest;
+                r.ebayLiveUsed = eb.usedLowest;
+                r.ebayLiveUrl = eb.url;
+              } catch {
+                r.ebayLiveNew = null;
+                r.ebayLiveUsed = null;
+                r.ebayLiveUrl = null;
+              }
+            })
+          );
+        }
+        console.log(`[EBAY] Sorgulanan ürün: ${withCode.length}/${results.length} (kodu olmayan ${results.length - withCode.length} atlandı) | ~${withCode.length * 2} istek`);
+      } catch (e) {
+        console.error("[EBAY] Toplu fiyat çekme başarısız:", e);
+      }
+    }
 
     console.log(
       `[HUNI] 3) Detayı çekilen: ${allProducts.length} | BSR dedup sonrası: ${dedupedResults.length}\n` +
