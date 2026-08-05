@@ -73,10 +73,11 @@ export async function lowestPriceForCondition(
   return { lowest: lowest !== null ? Math.round(lowest * 100) / 100 : null, count };
 }
 
-// eBay web arama linki - FİLTRESİZ (condition seçili gelmez), sadece kodla
+// eBay web arama linki - FİLTRESİZ (condition seçili gelmez), sadece kodla.
+// _sop=15: fiyat + kargo, ucuzdan pahalıya sırala (alım yapacağımız için ucuz olan önemli)
 export function ebaySearchUrl(code: string): string {
   const q = encodeURIComponent(code);
-  return `https://www.ebay.com/sch/i.html?_from=R40&_nkw=${q}&_sacat=0`;
+  return `https://www.ebay.com/sch/i.html?_from=R40&_nkw=${q}&_sacat=0&_sop=15`;
 }
 
 // Tek ürün için New + Used en düşük fiyatlar (paralel)
