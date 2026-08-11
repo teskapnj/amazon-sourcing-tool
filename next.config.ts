@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Telefondan (aynı wifi) dev sunucusuna erişim için gerekli
+  allowedDevOrigins: ["192.168.1.134"],
 };
 
 export default nextConfig;

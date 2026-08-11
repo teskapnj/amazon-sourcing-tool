@@ -61,16 +61,25 @@ export async function lowestPriceForCondition(
 
   const data = await res.json();
   const items: any[] = data.itemSummaries || [];
-  let lowest: number | null = null;
-  let count = 0;
+
+  const prices: number[] = [];
   for (const it of items) {
     const p = it.price?.value ? Number(it.price.value) : null;
     if (p !== null && !isNaN(p) && p > 0 && it.price?.currency === "USD") {
-      count++;
-      if (lowest === null || p < lowest) lowest = p;
+      prices.push(p);
     }
   }
-  return { lowest: lowest !== null ? Math.round(lowest * 100) / 100 : null, count };
+  prices.sort((a, b) => a - b);
+
+  // EN DÜŞÜĞÜ DEĞİL, İKİNCİ EN DÜŞÜĞÜ: en ucuz listing genelde hasarlı kopya,
+  // yanlış baskı veya hiç satmayan tuzak fiyat. İkincisi gerçek tabanı gösteriyor.
+  // Tek listing varsa mecburen onu kullanırız.
+  const picked = prices.length >= 2 ? prices[1] : prices.length === 1 ? prices[0] : null;
+
+  return {
+    lowest: picked !== null ? Math.round(picked * 100) / 100 : null,
+    count: prices.length,
+  };
 }
 
 // eBay web arama linki - FİLTRESİZ (condition seçili gelmez), sadece kodla.
@@ -92,5 +101,123 @@ export async function ebayPricesForCode(token: string, code: string) {
     usedLowest: usedRes.lowest,
     usedCount: usedRes.count,
     url: ebaySearchUrl(code),
+  };
+}
+// Başlık + yazar ile eBay araması (barkodsuz eski kitaplar için).
+// İKİ KATMANLI: önce sıkı (tırnaklı) sorgu, sonuç yoksa gevşek sorguya düşer.
+export async function priceRangeByTitle(
+  token: string,
+  title: string,
+  author?: string | null,
+  binding?: "hardcover" | "paperback" | "unknown" | null
+): Promise<{ low: number | null; high: number | null; count: number; url: string; debug?: any }> {
+  // Noktalama temizliği: eBay tırnak içindeki virgül/iki nokta/& işaretini
+  // birebir arıyor, bu da eşleşmeyi kaçırtıyor.
+  const cleanTitle = title.replace(/[:,;]/g, " ").replace(/\s+/g, " ").trim();
+  const cleanAuthor = author
+    ? author.replace(/&/g, " ").replace(/\s+/g, " ").trim()
+    : null;
+
+  const filters: string[] = [];
+  if (binding === "hardcover") filters.push("Format:{Hardcover}");
+  if (binding === "paperback") filters.push("Format:{Paperback}");
+  const aspectParam = filters.length
+    ? `&aspect_filter=${encodeURIComponent(`categoryId:267,${filters.join(",")}`)}`
+    : "";
+
+  const webUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(
+    cleanAuthor ? `${cleanTitle} ${cleanAuthor}` : cleanTitle
+  )}&_sacat=267&_sop=15`;
+
+  async function run(q: string) {
+    const url =
+      `https://api.ebay.com/buy/browse/v1/item_summary/search` +
+      `?q=${encodeURIComponent(q)}` +
+      `&category_ids=267` +
+      `&limit=50` +
+      aspectParam;
+
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+        "Content-Type": "application/json",
+      },
+    });
+    if (!res.ok) return { prices: [] as number[], items: [] as any[] };
+
+    const data = await res.json();
+    const items: any[] = data.itemSummaries || [];
+    const matched = items.filter((it) => titleMatches(it.title || ""));
+    const prices: number[] = [];
+    for (const it of matched) {
+      const p = it.price?.value ? Number(it.price.value) : null;
+      if (p !== null && !isNaN(p) && p > 0 && it.price?.currency === "USD") prices.push(p);
+    }
+    prices.sort((a, b) => a - b);
+    return { prices, items: matched, dropped: items.length - matched.length };
+  }
+  // eBay gevşek eşleştiriyor: "Golden Argosy" araması farklı antolojileri de getiriyor.
+  // Başlıktaki anlamlı kelimelerin çoğu listing başlığında geçmiyorsa listing'i ELE.
+  function titleMatches(listingTitle: string): boolean {
+    const stop = new Set(["the", "a", "an", "of", "and", "to", "in", "for", "with", "by"]);
+    const words = cleanTitle
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length > 2 && !stop.has(w));
+    if (words.length === 0) return true;
+
+    const lt = listingTitle.toLowerCase();
+    const hits = words.filter((w) => lt.includes(w)).length;
+    // Anlamlı kelimelerin en az %70'i geçmeli
+    return hits / words.length >= 0.7;
+  }
+
+  // 1. KATMAN: sıkı - başlık tırnakta, yazar serbest
+  const strictQ = cleanAuthor ? `"${cleanTitle}" ${cleanAuthor}` : `"${cleanTitle}"`;
+  let { prices, items } = await run(strictQ);
+  let usedQ = strictQ;
+  let tier = "strict";
+
+  // 2. KATMAN: sonuç yok veya çok az -> tırnaksız, gevşek
+  if (prices.length < 2) {
+    const looseQ = cleanAuthor ? `${cleanTitle} ${cleanAuthor}` : cleanTitle;
+    const loose = await run(looseQ);
+    if (loose.prices.length > prices.length) {
+      prices = loose.prices;
+      items = loose.items;
+      usedQ = looseQ;
+      tier = "loose";
+    }
+  }
+
+  const debug = {
+    query: usedQ,
+    tier,
+    bindingFilter: filters.join(",") || "none",
+    dropped: (items as any).dropped ?? 0,
+    samples: items.slice(0, 5).map((it) => ({
+      title: (it.title || "").slice(0, 70),
+      price: it.price?.value ?? null,
+      condition: it.condition ?? null,
+    })),
+  };
+
+  if (prices.length === 0) {
+    return { low: null, high: null, count: 0, url: webUrl, debug };
+  }
+
+ // Aralık gösteriyoruz: low = gerçek taban, high = tavan.
+  // İkinci-en-düşük kuralı kaldırıldı - tutarsızdı ve hangi rakamın
+  // geldiği belli olmuyordu. Aralık zaten belirsizliği dürüstçe gösteriyor.
+  const low = prices[0];
+  const high = prices[prices.length - 1];
+
+  return {
+    low: Math.round(low * 100) / 100,
+    high: Math.round(high * 100) / 100,
+    count: prices.length,
+    url: webUrl,
+    debug,
   };
 }
