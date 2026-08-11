@@ -119,8 +119,10 @@ export async function priceRangeByTitle(
     : null;
 
   const filters: string[] = [];
-  if (binding === "hardcover") filters.push("Format:{Hardcover}");
-  if (binding === "paperback") filters.push("Format:{Paperback}");
+ // FORMAT FİLTRESİ KAPALI - KANIT: "Bread Lover's Bread Machine Cookbook"
+  // eBay'de 44 listing, $5.67'den başlıyor; filtre yüzünden API sadece 2 sonuç
+  // görüp $32 diyordu. Model formatı tutarsız tahmin ediyor ve yanlış tahmin
+  // sonuçların çoğunu kesiyor.
   const aspectParam = filters.length
     ? `&aspect_filter=${encodeURIComponent(`categoryId:267,${filters.join(",")}`)}`
     : "";
