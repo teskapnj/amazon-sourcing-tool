@@ -27,6 +27,8 @@ export default function ScanPage() {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  // Son incelenen kitap - listede nerede kaldığını görmek için açık yeşil
+  const [checkedTitle, setCheckedTitle] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   // Galeriden yükleme için ayrı input: capture="environment" olmadığı için
   // doğrudan kamera açmaz, dosya seçtirir
@@ -104,7 +106,7 @@ export default function ScanPage() {
         Shelf Scan
       </h1>
       <p className="font-mono" style={{ fontSize: "11px", color: "#8A8F98", margin: "0 0 18px" }}>
-        Photograph a stack of spines. Highest eBay price first.
+      Photograph a stack of spines. Listed in shelf order.
       </p>
 
       <input
@@ -171,7 +173,7 @@ export default function ScanPage() {
         <img
           src={preview}
           alt=""
-          style={{ width: "100%", borderRadius: "8px", marginTop: "14px", opacity: 0.55 }}
+          style={{ width: "100%", borderRadius: "8px", marginTop: "14px" }}
         />
       )}
 
@@ -181,13 +183,23 @@ export default function ScanPage() {
           return (
             <div
               key={i}
+              onClick={() => setCheckedTitle(b.title)}
               style={{
                 border: "1px solid var(--line)",
                 borderLeft: worth ? "4px solid #3B82F6" : "1px solid var(--line)",
                 borderRadius: "8px",
                 padding: "13px 14px",
                 marginBottom: "10px",
-                background: worth ? "rgba(59,130,246,0.07)" : b.confidence === "low" ? "rgba(199,119,0,0.06)" : "#fff",
+                cursor: "pointer",
+                // Son tıklanan kitap açık yeşil - listede kaldığın yeri gösterir
+                background:
+                  checkedTitle === b.title
+                    ? "#D9F5E0"
+                    : worth
+                    ? "rgba(59,130,246,0.07)"
+                    : b.confidence === "low"
+                    ? "rgba(199,119,0,0.06)"
+                    : "#fff",
               }}
             >
               <div style={{ fontSize: "15px", fontWeight: 500, lineHeight: 1.35 }}>{b.title}</div>
