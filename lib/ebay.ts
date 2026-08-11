@@ -114,6 +114,16 @@ export async function priceRangeByTitle(
   // Noktalama temizliği: eBay tırnak içindeki virgül/iki nokta/& işaretini
   // birebir arıyor, bu da eşleşmeyi kaçırtıyor.
   const cleanTitle = title.replace(/[:,;]/g, " ").replace(/\s+/g, " ").trim();
+
+  // eBay'de boşluk zaten AND: her kelime listing başlığında GEÇMELİ.
+  // 12 kelimelik başlıkta (Complete Shakespeare with the Temple Notes...) hiçbir
+  // listing tutmuyor. İlk 6 anlamlı kelime yeterli ayırt edicilik sağlıyor.
+  const stopWords = new Set(["the", "a", "an", "of", "and", "to", "in", "for", "with", "by", "or"]);
+  const shortTitle = cleanTitle
+    .split(" ")
+    .filter((w) => w.length > 1 && !stopWords.has(w.toLowerCase()))
+    .slice(0, 6)
+    .join(" ");
   const cleanAuthor = author
     ? author.replace(/&/g, " ").replace(/\s+/g, " ").trim()
     : null;
@@ -175,21 +185,23 @@ export async function priceRangeByTitle(
     return hits / words.length >= 0.7;
   }
 
-  // 1. KATMAN: sıkı - başlık tırnakta, yazar serbest
-  const strictQ = cleanAuthor ? `"${cleanTitle}" ${cleanAuthor}` : `"${cleanTitle}"`;
-  let { prices, items } = await run(strictQ);
-  let usedQ = strictQ;
-  let tier = "strict";
+ // 1. KATMAN: kısa başlık + yazar. TIRNAK YOK - eBay dokümanına göre boşluk
+  // zaten AND anlamına geliyor; tırnak ayrıca "aynı sırayla, aynen" şartı koyup
+  // sonuçların çoğunu kesiyordu (Bread Machine Cookbook: 44 listing -> 2).
+  const primaryQ = cleanAuthor ? `${shortTitle} ${cleanAuthor}` : shortTitle;
+  let { prices, items } = await run(primaryQ);
+  let usedQ = primaryQ;
+  let tier = "primary";
 
-  // 2. KATMAN: sonuç yok veya çok az -> tırnaksız, gevşek
-  if (prices.length < 2) {
-    const looseQ = cleanAuthor ? `${cleanTitle} ${cleanAuthor}` : cleanTitle;
-    const loose = await run(looseQ);
-    if (loose.prices.length > prices.length) {
-      prices = loose.prices;
-      items = loose.items;
-      usedQ = looseQ;
-      tier = "loose";
+  // 2. KATMAN: hâlâ sonuç yoksa yazarı at, sadece başlıkla dene.
+  // (Model yazarı yanlış okuduysa AND yüzünden her şeyi eliyor olabilir.)
+  if (prices.length === 0 && cleanAuthor) {
+    const fallback = await run(shortTitle);
+    if (fallback.prices.length > 0) {
+      prices = fallback.prices;
+      items = fallback.items;
+      usedQ = shortTitle;
+      tier = "title-only";
     }
   }
 
