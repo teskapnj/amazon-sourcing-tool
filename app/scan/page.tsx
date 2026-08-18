@@ -1,25 +1,34 @@
 "use client";
 
-import { useState, useRef, CSSProperties } from "react";
+import { useState, useRef } from "react";
 
-// Estate sale'de telefonda kullanılacak sayfa: /scan
-// Fotoğraf çek -> kitaplar okunsun -> eBay fiyat aralıkları gelsin.
-// Amaç kesin fiyat değil: yığındaki hangi kitaba elle bakılacağını göstermek.
-
+// API'den gelen verinin tam veri tipi
 type ScanBook = {
   title: string;
   author: string | null;
-  binding: "hardcover" | "paperback" | "unknown";
-  confidence: "high" | "low";
-  low: number | null;
-  high: number | null;
-  count: number;
-  url: string | null;
+  publisher?: string | null;
+  binding?: "hardcover" | "paperback" | "unknown";
+  confidence?: "high" | "low" | number;
+  isbn13?: string | null;
+  isbn10?: string | null;
+  ebay?: {
+    low: number | null;
+    high: number | null;
+    count: number;
+    url: string | null;
+  };
+  keepa?: {
+    amazonPrice: number | null;
+    usedPrice: number | null;
+    salesRank: number | null;
+  };
+  // Düz yapı desteği (fallback için)
+  low?: number | null;
+  high?: number | null;
+  count?: number;
+  url?: string | null;
 };
 
-// Bu değerin üstündeki kitaplar vurgulanır - "buna elle bak" sinyali
-// Tabanı bu değerin üstündeyse vurgula: en ucuz kopyası bile pahalıysa
-// kitap gerçekten değerli demektir (tek bir aykırı listing değil).
 const WORTH_CHECKING = 25;
 
 export default function ScanPage() {
@@ -27,14 +36,11 @@ export default function ScanPage() {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
-  // Son incelenen kitap - listede nerede kaldığını görmek için açık yeşil
   const [checkedTitle, setCheckedTitle] = useState<string | null>(null);
+
   const fileRef = useRef<HTMLInputElement>(null);
-  // Galeriden yükleme için ayrı input: capture="environment" olmadığı için
-  // doğrudan kamera açmaz, dosya seçtirir
   const uploadRef = useRef<HTMLInputElement>(null);
 
-  // Telefon fotoğrafı 4-5MB olabiliyor - yüklemeden önce küçült (hız + maliyet)
   async function compress(file: File): Promise<string> {
     const dataUrl = await new Promise<string>((res, rej) => {
       const r = new FileReader();
@@ -58,9 +64,9 @@ export default function ScanPage() {
         canvas.height = height;
         const ctx = canvas.getContext("2d");
         ctx?.drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL("image/jpeg", 0.80));
+        resolve(canvas.toDataURL("image/jpeg", 0.8));
       };
-      img.onerror = () => resolve(dataUrl); // küçültme başarısızsa orijinali gönder
+      img.onerror = () => resolve(dataUrl);
       img.src = dataUrl;
     });
   }
@@ -97,6 +103,7 @@ export default function ScanPage() {
     } finally {
       setLoading(false);
       if (fileRef.current) fileRef.current.value = "";
+      if (uploadRef.current) uploadRef.current.value = "";
     }
   }
 
@@ -106,7 +113,7 @@ export default function ScanPage() {
         Shelf Scan
       </h1>
       <p className="font-mono" style={{ fontSize: "11px", color: "#8A8F98", margin: "0 0 18px" }}>
-      Photograph a stack of spines. Listed in shelf order.
+        Photograph a stack of spines. Listed in shelf order.
       </p>
 
       <input
@@ -118,7 +125,7 @@ export default function ScanPage() {
         style={{ display: "none" }}
       />
 
-<input
+      <input
         ref={uploadRef}
         type="file"
         accept="image/*"
@@ -132,17 +139,17 @@ export default function ScanPage() {
           disabled={loading}
           style={{
             flex: 2,
-            background: loading ? "#8A8F98" : "var(--ink)",
+            background: loading ? "#8A8F98" : "var(--ink, #111)",
             color: "#fff",
             border: "none",
             borderRadius: "10px",
             padding: "20px",
             fontSize: "17px",
             fontWeight: 600,
-            cursor: "pointer",
+            cursor: loading ? "not-allowed" : "pointer",
           }}
         >
-          {loading ? "Scanning..." : "📷  Take photo"}
+          {loading ? "Scanning..." : "📷 Take photo"}
         </button>
         <button
           onClick={() => uploadRef.current?.click()}
@@ -150,13 +157,13 @@ export default function ScanPage() {
           style={{
             flex: 1,
             background: "transparent",
-            color: "var(--ink)",
-            border: "1px solid var(--ink)",
+            color: "var(--ink, #111)",
+            border: "1px solid var(--ink, #111)",
             borderRadius: "10px",
             padding: "20px 10px",
             fontSize: "15px",
             fontWeight: 500,
-            cursor: "pointer",
+            cursor: loading ? "not-allowed" : "pointer",
           }}
         >
           Upload
@@ -164,7 +171,7 @@ export default function ScanPage() {
       </div>
 
       {status && (
-        <p className="font-mono" style={{ fontSize: "12px", color: "var(--pine)", marginTop: "12px", marginBottom: 0 }}>
+        <p className="font-mono" style={{ fontSize: "12px", color: "var(--pine, #059669)", marginTop: "12px", marginBottom: 0 }}>
           {status}
         </p>
       )}
@@ -172,64 +179,103 @@ export default function ScanPage() {
       {preview && !loading && (
         <img
           src={preview}
-          alt=""
+          alt="Preview"
           style={{ width: "100%", borderRadius: "8px", marginTop: "14px" }}
         />
       )}
 
       <div style={{ marginTop: "20px" }}>
         {books.map((b, i) => {
-          const worth = b.low != null && b.low >= WORTH_CHECKING;
+          // Hem iç içe obje (b.ebay) hem de düz veri yapılarını güvenle oku
+          const low = b.ebay?.low ?? b.low ?? null;
+          const high = b.ebay?.high ?? b.high ?? null;
+          const count = b.ebay?.count ?? b.count ?? 0;
+          const url = b.ebay?.url ?? b.url ?? null;
+
+          const amazonPrice = b.keepa?.amazonPrice ?? null;
+          const usedPrice = b.keepa?.usedPrice ?? null;
+          const salesRank = b.keepa?.salesRank ?? null;
+
+          const worth = low != null && low >= WORTH_CHECKING;
+          const isChecked = checkedTitle === b.title;
+
           return (
             <div
               key={i}
               onClick={() => setCheckedTitle(b.title)}
               style={{
-                border: "1px solid var(--line)",
-                borderLeft: worth ? "4px solid #3B82F6" : "1px solid var(--line)",
+                border: "1px solid var(--line, #E5E7EB)",
+                borderLeft: worth ? "4px solid #3B82F6" : "1px solid var(--line, #E5E7EB)",
                 borderRadius: "8px",
                 padding: "13px 14px",
                 marginBottom: "10px",
                 cursor: "pointer",
-                // Son tıklanan kitap açık yeşil - listede kaldığın yeri gösterir
-                background:
-                  checkedTitle === b.title
-                    ? "#D9F5E0"
-                    : worth
-                    ? "rgba(59,130,246,0.07)"
-                    : b.confidence === "low"
-                    ? "rgba(199,119,0,0.06)"
-                    : "#fff",
+                background: isChecked
+                  ? "#D9F5E0"
+                  : worth
+                  ? "rgba(59,130,246,0.07)"
+                  : b.confidence === "low"
+                  ? "rgba(199,119,0,0.06)"
+                  : "#fff",
               }}
             >
-              <div style={{ fontSize: "15px", fontWeight: 500, lineHeight: 1.35 }}>{b.title}</div>
+              <div style={{ fontSize: "15px", fontWeight: 500, lineHeight: 1.35 }}>
+                {b.title}
+              </div>
+              
               <div style={{ fontSize: "13px", color: "#5C6470", marginTop: "2px" }}>
                 {b.author || "—"}
                 <span className="font-mono" style={{ marginLeft: "8px", fontSize: "11px", color: "#8A8F98" }}>
-                  {b.binding === "unknown" ? "?" : b.binding}
+                  {b.binding === "unknown" || !b.binding ? "?" : b.binding}
                   {b.confidence === "low" && " · unsure"}
+                  {b.isbn13 && ` · ISBN: ${b.isbn13}`}
                 </span>
               </div>
 
+                            {/* Keepa Amazon Fiyatları */}
+                            {(amazonPrice || usedPrice || salesRank || b.isbn10) && (
+                <div style={{ fontSize: "12px", color: "#0F766E", marginTop: "6px", display: "flex", gap: "10px", alignItems: "baseline" }}>
+                  {amazonPrice && <span>New: ${amazonPrice.toFixed(2)}</span>}
+                  {usedPrice && <span>Used: ${usedPrice.toFixed(2)}</span>}
+                  {salesRank && <span>Rank: #{salesRank.toLocaleString()}</span>}
+                  {b.isbn10 && (
+                    
+                      <a href={`https://www.amazon.com/dp/${b.isbn10}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      style={{ marginLeft: "auto", fontSize: "13px", color: "#B45309", textDecoration: "none" }}
+                    >
+                      Amazon →
+                    </a>
+                  )}
+                </div>
+              )}
+
+              {/* eBay Fiyatları */}
               <div style={{ display: "flex", alignItems: "baseline", gap: "14px", marginTop: "9px" }}>
-                {b.count === 0 ? (
-                  <span className="font-mono" style={{ fontSize: "13px", color: "#B0B4BA" }}>no listings</span>
+                {count === 0 ? (
+                  <span className="font-mono" style={{ fontSize: "13px", color: "#B0B4BA" }}>
+                    no ebay listings
+                  </span>
                 ) : (
                   <>
-                   <span className="font-mono" style={{ fontSize: "19px", fontWeight: 600, color: worth ? "#1D4ED8" : "var(--ink)" }}>
-                      ${Math.round(b.low ?? 0)} – ${Math.round(b.high ?? 0)}
+                    <span className="font-mono" style={{ fontSize: "19px", fontWeight: 600, color: worth ? "#1D4ED8" : "var(--ink, #111)" }}>
+                      ${Math.round(low ?? 0)} – ${Math.round(high ?? 0)}
                     </span>
                     <span className="font-mono" style={{ fontSize: "12px", color: "#8A8F98" }}>
-                      {b.count} listings
+                      {count} listings
                     </span>
                   </>
                 )}
-                {b.url && (
-                  
-                    <a href={b.url}
+
+                {url && (
+                  <a
+                    href={url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    style={{ marginLeft: "auto", fontSize: "13px", color: "var(--pine)" }}
+                    onClick={(e) => e.stopPropagation()} // Kart tıklama olayının tetiklenmesini önler
+                    style={{ marginLeft: "auto", fontSize: "13px", color: "var(--pine, #059669)", textDecoration: "none" }}
                   >
                     eBay →
                   </a>

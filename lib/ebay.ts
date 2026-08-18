@@ -71,9 +71,6 @@ export async function lowestPriceForCondition(
   }
   prices.sort((a, b) => a - b);
 
-  // EN DÜŞÜĞÜ DEĞİL, İKİNCİ EN DÜŞÜĞÜ: en ucuz listing genelde hasarlı kopya,
-  // yanlış baskı veya hiç satmayan tuzak fiyat. İkincisi gerçek tabanı gösteriyor.
-  // Tek listing varsa mecburen onu kullanırız.
   const picked = prices.length >= 2 ? prices[1] : prices.length === 1 ? prices[0] : null;
 
   return {
@@ -82,8 +79,7 @@ export async function lowestPriceForCondition(
   };
 }
 
-// eBay web arama linki - FİLTRESİZ (condition seçili gelmez), sadece kodla.
-// _sop=15: fiyat + kargo, ucuzdan pahalıya sırala (alım yapacağımız için ucuz olan önemli)
+// eBay web arama linki - FİLTRESİZ, sadece kodla.
 export function ebaySearchUrl(code: string): string {
   const q = encodeURIComponent(code);
   return `https://www.ebay.com/sch/i.html?_from=R40&_nkw=${q}&_sacat=0&_sop=15`;
@@ -103,21 +99,21 @@ export async function ebayPricesForCode(token: string, code: string) {
     url: ebaySearchUrl(code),
   };
 }
-// Başlık + yazar ile eBay araması (barkodsuz eski kitaplar için).
-// İKİ KATMANLI: önce sıkı (tırnaklı) sorgu, sonuç yoksa gevşek sorguya düşer.
+
+// Başlık + yazar veya ISBN13 ile eBay araması.
+// ÜÇ KATMANLI: 
+//   0. Katman: ISBN-13 (GTIN) ile kesin eşleşme
+//   1. Katman: Kısa başlık + yazar
+//   2. Katman: Sadece kısa başlık
 export async function priceRangeByTitle(
   token: string,
   title: string,
   author?: string | null,
-  binding?: "hardcover" | "paperback" | "unknown" | null
+  binding?: "hardcover" | "paperback" | "unknown" | null,
+  isbn13?: string | null
 ): Promise<{ low: number | null; high: number | null; count: number; url: string; debug?: any }> {
-  // Noktalama temizliği: eBay tırnak içindeki virgül/iki nokta/& işaretini
-  // birebir arıyor, bu da eşleşmeyi kaçırtıyor.
   const cleanTitle = title.replace(/[:,;]/g, " ").replace(/\s+/g, " ").trim();
 
-  // eBay'de boşluk zaten AND: her kelime listing başlığında GEÇMELİ.
-  // 12 kelimelik başlıkta (Complete Shakespeare with the Temple Notes...) hiçbir
-  // listing tutmuyor. İlk 6 anlamlı kelime yeterli ayırt edicilik sağlıyor.
   const stopWords = new Set(["the", "a", "an", "of", "and", "to", "in", "for", "with", "by", "or"]);
   const shortTitle = cleanTitle
     .split(" ")
@@ -129,22 +125,18 @@ export async function priceRangeByTitle(
     : null;
 
   const filters: string[] = [];
- // FORMAT FİLTRESİ KAPALI - KANIT: "Bread Lover's Bread Machine Cookbook"
-  // eBay'de 44 listing, $5.67'den başlıyor; filtre yüzünden API sadece 2 sonuç
-  // görüp $32 diyordu. Model formatı tutarsız tahmin ediyor ve yanlış tahmin
-  // sonuçların çoğunu kesiyor.
   const aspectParam = filters.length
     ? `&aspect_filter=${encodeURIComponent(`categoryId:267,${filters.join(",")}`)}`
     : "";
 
   const webUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(
-    cleanAuthor ? `${cleanTitle} ${cleanAuthor}` : cleanTitle
+    isbn13 || (cleanAuthor ? `${cleanTitle} ${cleanAuthor}` : cleanTitle)
   )}&_sacat=267&_sop=15`;
 
-  async function run(q: string) {
+  async function run(q: string, gtinQuery = false) {
     const url =
       `https://api.ebay.com/buy/browse/v1/item_summary/search` +
-      `?q=${encodeURIComponent(q)}` +
+      `?${gtinQuery ? `gtin=${encodeURIComponent(q)}` : `q=${encodeURIComponent(q)}`}` +
       `&category_ids=267` +
       `&limit=50` +
       aspectParam;
@@ -156,11 +148,12 @@ export async function priceRangeByTitle(
         "Content-Type": "application/json",
       },
     });
-    if (!res.ok) return { prices: [] as number[], items: [] as any[] };
+    if (!res.ok) return { prices: [] as number[], items: [] as any[], dropped: 0 };
 
     const data = await res.json();
     const items: any[] = data.itemSummaries || [];
-    const matched = items.filter((it) => titleMatches(it.title || ""));
+    // GTIN sorgusunda kelime bazlı başlık filtresine gerek kalmaz, direkt eşleşir
+    const matched = gtinQuery ? items : items.filter((it) => titleMatches(it.title || ""));
     const prices: number[] = [];
     for (const it of matched) {
       const p = it.price?.value ? Number(it.price.value) : null;
@@ -169,8 +162,7 @@ export async function priceRangeByTitle(
     prices.sort((a, b) => a - b);
     return { prices, items: matched, dropped: items.length - matched.length };
   }
-  // eBay gevşek eşleştiriyor: "Golden Argosy" araması farklı antolojileri de getiriyor.
-  // Başlıktaki anlamlı kelimelerin çoğu listing başlığında geçmiyorsa listing'i ELE.
+
   function titleMatches(listingTitle: string): boolean {
     const stop = new Set(["the", "a", "an", "of", "and", "to", "in", "for", "with", "by"]);
     const words = cleanTitle
@@ -181,27 +173,47 @@ export async function priceRangeByTitle(
 
     const lt = listingTitle.toLowerCase();
     const hits = words.filter((w) => lt.includes(w)).length;
-    // Anlamlı kelimelerin en az %70'i geçmeli
     return hits / words.length >= 0.7;
   }
 
- // 1. KATMAN: kısa başlık + yazar. TIRNAK YOK - eBay dokümanına göre boşluk
-  // zaten AND anlamına geliyor; tırnak ayrıca "aynı sırayla, aynen" şartı koyup
-  // sonuçların çoğunu kesiyordu (Bread Machine Cookbook: 44 listing -> 2).
-  const primaryQ = cleanAuthor ? `${shortTitle} ${cleanAuthor}` : shortTitle;
-  let { prices, items } = await run(primaryQ);
-  let usedQ = primaryQ;
-  let tier = "primary";
+  let prices: number[] = [];
+  let items: any[] = [];
+  let usedQ = "";
+  let tier = "";
+  let droppedCount = 0;
 
-  // 2. KATMAN: hâlâ sonuç yoksa yazarı at, sadece başlıkla dene.
-  // (Model yazarı yanlış okuduysa AND yüzünden her şeyi eliyor olabilir.)
-  if (prices.length === 0 && cleanAuthor) {
-    const fallback = await run(shortTitle);
-    if (fallback.prices.length > 0) {
-      prices = fallback.prices;
-      items = fallback.items;
-      usedQ = shortTitle;
-      tier = "title-only";
+  // 0. KATMAN: ISBN-13 var ise gtin parametresiyle nokta atışı arama
+  if (isbn13) {
+    const gtinRes = await run(isbn13, true);
+    if (gtinRes.prices.length > 0) {
+      prices = gtinRes.prices;
+      items = gtinRes.items;
+      usedQ = `gtin:${isbn13}`;
+      tier = "isbn13-gtin";
+      droppedCount = gtinRes.dropped;
+    }
+  }
+
+  // 1. KATMAN: ISBN yoksa veya gtin araması sonuç dönmediyse Metin Bazlı Sorgu
+  if (prices.length === 0) {
+    const primaryQ = cleanAuthor ? `${shortTitle} ${cleanAuthor}` : shortTitle;
+    const primaryRes = await run(primaryQ);
+    prices = primaryRes.prices;
+    items = primaryRes.items;
+    usedQ = primaryQ;
+    tier = "primary-text";
+    droppedCount = primaryRes.dropped;
+
+    // 2. KATMAN: Sadece başlıkla gevşek arama
+    if (prices.length === 0 && cleanAuthor) {
+      const fallbackRes = await run(shortTitle);
+      if (fallbackRes.prices.length > 0) {
+        prices = fallbackRes.prices;
+        items = fallbackRes.items;
+        usedQ = shortTitle;
+        tier = "title-only";
+        droppedCount = fallbackRes.dropped;
+      }
     }
   }
 
@@ -209,7 +221,7 @@ export async function priceRangeByTitle(
     query: usedQ,
     tier,
     bindingFilter: filters.join(",") || "none",
-    dropped: (items as any).dropped ?? 0,
+    dropped: droppedCount,
     samples: items.slice(0, 5).map((it) => ({
       title: (it.title || "").slice(0, 70),
       price: it.price?.value ?? null,
@@ -221,9 +233,6 @@ export async function priceRangeByTitle(
     return { low: null, high: null, count: 0, url: webUrl, debug };
   }
 
- // Aralık gösteriyoruz: low = gerçek taban, high = tavan.
-  // İkinci-en-düşük kuralı kaldırıldı - tutarsızdı ve hangi rakamın
-  // geldiği belli olmuyordu. Aralık zaten belirsizliği dürüstçe gösteriyor.
   const low = prices[0];
   const high = prices[prices.length - 1];
 
